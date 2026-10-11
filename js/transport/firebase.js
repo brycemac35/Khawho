@@ -7,8 +7,8 @@ import { FIREBASE_CONFIG } from '../config.js';
 import { randomId } from '../rng.js';
 
 const FIREBASE_VERSION = '10.9.0';
-const FIREBASE_APP_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app.js`;
-const FIREBASE_DB_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-database.js`;
+const FIREBASE_APP_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app-compat.js`;
+const FIREBASE_DB_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-database-compat.js`;
 
 // Global Firebase instances
 let firebaseLoaded = false;
@@ -102,7 +102,7 @@ export async function createHost(opts) {
   await loadFirebase();
 
   const app = getFirebaseApp();
-  const db = window.firebase.database(app);
+  const db = app.database();
   const metaPath = `games/${pin}/meta`;
 
   let closed = false;
@@ -144,7 +144,6 @@ export async function createHost(opts) {
       if (closed) return;
 
       const connId = snapshot.key;
-      const playerData = snapshot.val();
 
       // Create connection object
       const hostConn = createHostConnection(db, pin, connId);
@@ -189,6 +188,10 @@ export async function createHost(opts) {
     close() {
       if (closed) return;
       closed = true;
+
+      // Remove all listeners on this game's paths
+      db.ref(`games/${pin}/players`).off();
+      db.ref(`games/${pin}/toHost`).off();
 
       connections.forEach((conn) => {
         if (conn._onClose) {
@@ -283,13 +286,14 @@ export async function joinGame(pin, opts = {}) {
   await loadFirebase();
 
   const app = getFirebaseApp();
-  const db = window.firebase.database(app);
+  const db = app.database();
   const connId = randomId();
 
   let closed = false;
   let onMessageCb = null;
   let onCloseCb = null;
   const messageBuffer = [];
+  let toPlayerListener = null;
 
   try {
     // Verify host exists
@@ -328,7 +332,7 @@ export async function joinGame(pin, opts = {}) {
     const toPlayerPath = `games/${pin}/toPlayer/${connId}`;
     const toPlayerRef = db.ref(toPlayerPath);
 
-    toPlayerRef.on('child_added', (snapshot) => {
+    toPlayerListener = toPlayerRef.on('child_added', (snapshot) => {
       if (closed) return;
 
       const pushId = snapshot.key;
@@ -377,6 +381,9 @@ export async function joinGame(pin, opts = {}) {
     close() {
       if (closed) return;
       closed = true;
+
+      // Remove listener
+      db.ref(`games/${pin}/toPlayer/${connId}`).off();
 
       // Remove player connection
       const playerRef = db.ref(`games/${pin}/players/${connId}`);
