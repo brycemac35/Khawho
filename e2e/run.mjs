@@ -71,17 +71,23 @@ async function testLocalTransport() {
     const context = await browser.newContext();
     console.log('✓ Browser context created');
 
-    // Load sample quiz into first page to seed localStorage
-    const seedPage = await context.newPage();
-    const sample = await loadSampleQuiz(seedPage);
-    await seedPage.close();
+    // Load host page first to set up localStorage origin
+    const hostPage = await context.newPage();
+    await hostPage.goto('http://localhost:8877/host.html?dev=1', { waitUntil: 'load' });
+
+    // Load sample quiz into localStorage
+    const samplePath = join(REPO_ROOT, 'samples', 'sample-quiz.json');
+    const sample = JSON.parse(readFileSync(samplePath, 'utf8'));
+    await hostPage.evaluate((quiz) => {
+      localStorage.setItem('khawho.quizzes', JSON.stringify([quiz]));
+    }, sample);
+    console.log('✓ Sample quiz loaded into localStorage');
 
     // Track console errors
     const consoleErrors = [];
     const pageErrors = [];
 
-    // Open host
-    const hostPage = await context.newPage();
+    // Set up error handlers
     hostPage.on('console', msg => {
       if (msg.type() === 'error') {
         consoleErrors.push(`Host: ${msg.text()}`);
