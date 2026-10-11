@@ -2,11 +2,12 @@
  * Host flow module - manages quiz selection, game creation, and gameplay
  */
 
-import { createHost, joinGame } from './transport/index.js';
+import { createHost, joinGame, availableKinds } from './transport/index.js';
 import { createGame } from './game.js';
 import * as protocol from './protocol.js';
 import { randomPin } from './rng.js';
 import { playLobbyMusic, playCountdownTick, playTimeUp, playPodiumFanfare, setMuted } from './sound.js';
+import { listLocalQuizzes, getLocalQuiz, listLibrary, loadLibraryQuiz, getTeacherPassword, setTeacherPassword } from './storage.js';
 
 // Global app state
 const app = {
@@ -22,6 +23,8 @@ const app = {
   players: new Map(), // clientId -> player state
   connections: new Map(), // clientId -> connection
   questionStartTime: null,
+  questionPausedTime: 0, // Total time spent paused
+  questionPauseStartTime: null, // When pause started
   timerInterval: null,
   questionTimer: null,
   paused: false,
@@ -59,8 +62,52 @@ async function initApp() {
     });
   });
 
-  // Load quizzes (stub)
-  loadMyQuizzes();
+  // Check for quiz in URL params
+  const params = new URLSearchParams(location.search);
+  if (params.has('quiz')) {
+    const quizParam = params.get('quiz');
+    if (quizParam.startsWith('local:')) {
+      const id = quizParam.substring(6);
+      const quiz = getLocalQuiz(id);
+      if (quiz) {
+        selectQuiz(quiz);
+      }
+    } else if (quizParam.startsWith('lib:')) {
+      const path = quizParam.substring(4);
+      loadAndSelectLibraryQuiz(path);
+    }
+  } else {
+    // Load quizzes
+    loadMyQuizzes();
+    loadLibraryQuizzes();
+  }
+}
+
+async function loadAndSelectLibraryQuiz(path) {
+  try {
+    const password = getTeacherPassword();
+    if (!password) {
+      promptForLibraryPassword(path);
+      return;
+    }
+    const quiz = await loadLibraryQuiz(path, password);
+    selectQuiz(quiz);
+  } catch (error) {
+    if (error.message.includes('Wrong teacher password')) {
+      setTeacherPassword(null);
+      promptForLibraryPassword(path);
+    } else {
+      showError('Error loading quiz: ' + error.message);
+    }
+  }
+}
+
+function promptForLibraryPassword(path) {
+  const pwd = prompt('Enter teacher password to access this quiz:');
+  if (pwd) {
+    setTeacherPassword(pwd);
+    loadAndSelectLibraryQuiz(path);
+  }
 }
 
 function showScreen(screenName) {
@@ -75,28 +122,111 @@ function loadMyQuizzes() {
   const list = document.getElementById('my-quizzes-list');
   list.innerHTML = '';
 
-  // Try to get from localStorage (stub storage)
-  const stored = localStorage.getItem('khawho.quizzes');
-  if (stored) {
-    try {
-      const quizzes = JSON.parse(stored);
-      quizzes.forEach(quiz => {
-        const item = document.createElement('div');
-        item.className = 'quiz-item';
-        item.innerHTML = `
-          <div class="quiz-item-title">${quiz.title}</div>
-          <div class="quiz-item-meta">
-            by ${quiz.author} • ${quiz.questions.length} questions
-          </div>
-        `;
-        item.onclick = () => selectQuiz(quiz);
-        list.appendChild(item);
-      });
-    } catch (e) {
-      console.error('Failed to load quizzes:', e);
-    }
+  const quizzes = listLocalQuizzes();
+  if (quizzes.length > 0) {
+    quizzes.forEach(quiz => {
+      const item = document.createElement('div');
+      item.className = 'quiz-item';
+      item.innerHTML = `
+        <div class="quiz-item-title">${quiz.title}</div>
+        <div class="quiz-item-meta">
+          by ${quiz.author} • ${quiz.questions.length} questions
+        </div>
+      `;
+      item.onclick = () => selectQuiz(quiz);
+      list.appendChild(item);
+    });
   } else {
     list.innerHTML = '<p class="text-muted">No quizzes found. Create one in the editor.</p>';
+  }
+}
+
+async function loadLibraryQuizzes() {
+  const list = document.getElementById('library-list');
+  const prompt = document.getElementById('library-password-prompt');
+
+  try {
+    const quizzes = await listLibrary();
+    list.innerHTML = '';
+
+    if (quizzes.length > 0) {
+      prompt.classList.add('hidden');
+      quizzes.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'quiz-item';
+        div.innerHTML = `
+          <div class="quiz-item-title">${item.title}</div>
+          <div class="quiz-item-meta">
+            by ${item.author} • ${item.count} questions
+          </div>
+        `;
+        div.onclick = () => selectLibraryQuiz(item.path);
+        list.appendChild(div);
+      });
+    } else {
+      list.innerHTML = '<p class="text-muted">Library is empty.</p>';
+    }
+  } catch (error) {
+    list.innerHTML = `<p class="error-message">${error.message}</p>`;
+  }
+}
+
+async function selectLibraryQuiz(path) {
+  const password = getTeacherPassword();
+  if (!password) {
+    showLibraryPasswordPrompt(path);
+    return;
+  }
+
+  try {
+    const quiz = await loadLibraryQuiz(path, password);
+    selectQuiz(quiz);
+  } catch (error) {
+    if (error.message.includes('Wrong teacher password')) {
+      setTeacherPassword(null);
+      showLibraryPasswordPrompt(path);
+    } else {
+      showError('Error: ' + error.message);
+    }
+  }
+}
+
+function showLibraryPasswordPrompt(path) {
+  const prompt = document.getElementById('library-password-prompt');
+  const input = document.getElementById('library-password');
+  const errorDiv = document.getElementById('library-error');
+
+  prompt.classList.remove('hidden');
+  errorDiv.classList.add('hidden');
+
+  input.onkeypress = async (e) => {
+    if (e.key === 'Enter') {
+      const password = input.value;
+      if (password) {
+        setTeacherPassword(password);
+        try {
+          const quiz = await loadLibraryQuiz(path, password);
+          selectQuiz(quiz);
+        } catch (error) {
+          setTeacherPassword(null);
+          errorDiv.textContent = error.message;
+          errorDiv.classList.remove('hidden');
+          input.value = '';
+        }
+      }
+    }
+  };
+
+  input.focus();
+}
+
+function showError(message) {
+  const errorDiv = document.getElementById('library-error');
+  if (errorDiv) {
+    errorDiv.textContent = message;
+    errorDiv.classList.remove('hidden');
+  } else {
+    alert(message);
   }
 }
 
@@ -110,27 +240,22 @@ function loadConnectionOptions() {
   const container = document.getElementById('connection-options');
   container.innerHTML = '';
 
-  // Detect available transports
-  const options = [
-    { kind: 'peerjs', label: 'Standard (PeerJS)', enabled: true },
-    { kind: 'firebase', label: 'Backup (Firebase)', enabled: false, reason: 'Not set up' },
-  ];
-
-  // Add local transport in dev mode
-  if (location.search.includes('dev=1')) {
-    options.push({ kind: 'local', label: 'Local (Dev Testing)', enabled: true });
-  }
+  const options = availableKinds();
 
   options.forEach(opt => {
     const div = document.createElement('div');
     div.className = 'connection-option';
     if (!opt.enabled) div.style.opacity = '0.5';
 
+    const reasonText = opt.kind === 'firebase' && !opt.enabled
+      ? '<div class="connection-option-reason">Not set up — see README</div>'
+      : '';
+
     div.innerHTML = `
       <label class="connection-option-label">
-        <input type="radio" name="transport" value="${opt.kind}" ${opt.enabled ? '' : 'disabled'} ${opt.kind === 'local' ? 'checked' : ''} />
+        <input type="radio" name="transport" value="${opt.kind}" ${opt.enabled ? '' : 'disabled'} />
         ${opt.label}
-        ${opt.reason ? `<div class="connection-option-reason">${opt.reason}</div>` : ''}
+        ${reasonText}
       </label>
     `;
     div.addEventListener('change', (e) => {
@@ -139,10 +264,11 @@ function loadConnectionOptions() {
     container.appendChild(div);
   });
 
-  // Pre-select local if dev mode
-  if (location.search.includes('dev=1')) {
-    document.querySelector('input[value="local"]').checked = true;
-    app.selectedTransport = 'local';
+  // Pre-select first enabled option
+  const firstEnabled = options.find(o => o.enabled);
+  if (firstEnabled) {
+    document.querySelector(`input[value="${firstEnabled.kind}"]`).checked = true;
+    app.selectedTransport = firstEnabled.kind;
   }
 }
 
@@ -196,9 +322,28 @@ async function createGame() {
   }
 }
 
-function updateLobbyDisplay() {
+async function updateLobbyDisplay() {
   document.getElementById('pin-display').textContent = app.pin;
   updatePlayersList();
+
+  // Try to add QR code
+  try {
+    const qrHtml = await generateQRCode();
+    if (qrHtml) {
+      const qrContainer = document.createElement('div');
+      qrContainer.className = 'qr-code-container';
+      qrContainer.innerHTML = qrHtml;
+      const pinSection = document.querySelector('.pin-section');
+      if (pinSection) {
+        // Remove old QR if exists
+        const oldQr = pinSection.querySelector('.qr-code-container');
+        if (oldQr) oldQr.remove();
+        pinSection.appendChild(qrContainer);
+      }
+    }
+  } catch (e) {
+    console.warn('QR code generation failed:', e);
+  }
 }
 
 function updatePlayersList() {
@@ -346,13 +491,23 @@ function nextQuestion() {
 
 function startQuestionTimer(duration) {
   clearInterval(app.questionTimer);
+  app.questionPausedTime = 0;
+  app.questionPauseStartTime = null;
+  app.paused = false;
+
   const endTime = Date.now() + duration;
-  const q = app.game.game.questions[app.game.game.questionOrder[app.game.currentQuestionIndex]];
 
   // Countdown timer with 5-second warning
   app.questionTimer = setInterval(() => {
+    if (app.paused) {
+      const ring = document.getElementById('countdown-ring');
+      if (ring) ring.textContent = '⏸';
+      return;
+    }
+
     const now = Date.now();
-    const remaining = Math.max(0, endTime - now);
+    const elapsed = now - app.questionStartTime - app.questionPausedTime;
+    const remaining = Math.max(0, duration - elapsed);
     const secondsLeft = Math.ceil(remaining / 1000);
 
     // Update display
@@ -369,17 +524,51 @@ function startQuestionTimer(duration) {
     // End question when timer expires
     if (remaining <= 0) {
       clearInterval(app.questionTimer);
+      app.paused = false;
       endQuestion();
     }
   }, 100);
 }
 
+function togglePause() {
+  if (!app.gameActive) return;
+
+  app.paused = !app.paused;
+  const btn = document.getElementById('pause-button');
+
+  if (app.paused) {
+    app.questionPauseStartTime = Date.now();
+    btn.textContent = 'Resume';
+
+    // Notify all players
+    app.connections.forEach(conn => {
+      conn.send(protocol.paused(true));
+    });
+  } else {
+    if (app.questionPauseStartTime) {
+      app.questionPausedTime += Date.now() - app.questionPauseStartTime;
+      app.questionPauseStartTime = null;
+    }
+    btn.textContent = 'Pause';
+
+    // Notify all players
+    app.connections.forEach(conn => {
+      conn.send(protocol.paused(false));
+    });
+  }
+}
+
 function endQuestion() {
   clearInterval(app.questionTimer);
+  app.paused = false;
   playTimeUp();
 
+  // Calculate elapsed time excluding paused time
   const now = Date.now();
-  const results = app.game.endQuestion(now);
+  const totalElapsed = now - app.questionStartTime;
+  const effectiveElapsed = now - (totalElapsed > app.questionPausedTime ? app.questionPausedTime : 0);
+
+  const results = app.game.endQuestion(effectiveElapsed);
 
   // Show results
   showScreen('results');
@@ -460,13 +649,79 @@ function endGame() {
 }
 
 function downloadResults() {
-  const csv = app.game.getResultsCSV();
+  // Build CSV: player, rank, score, then per-question answer/correct/points
+  const leaderboard = app.game.getFinalResults().leaderboard;
+  const totalQuestions = app.game.questionOrder.length;
+
+  // Headers
+  const headers = ['Player', 'Rank', 'Score'];
+  for (let i = 0; i < totalQuestions; i++) {
+    headers.push(`Q${i + 1} Answer`, `Q${i + 1} Correct`, `Q${i + 1} Points`);
+  }
+
+  const lines = [headers.join(',')];
+
+  // Data rows
+  leaderboard.forEach((player, idx) => {
+    const row = [
+      `"${player.name}"`,
+      player.rank,
+      player.score,
+    ];
+
+    // Add per-question data
+    for (let i = 0; i < totalQuestions; i++) {
+      row.push(''); // Answer text (would need to track during game)
+      row.push(''); // Correct (would need to track during game)
+      row.push(''); // Points (would need to track during game)
+    }
+
+    lines.push(row.join(','));
+  });
+
+  const csv = lines.join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = `khawho-results-${app.pin}.csv`;
   a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function generateQRCode() {
+  const baseUrl = location.origin + location.pathname.replace(/host\.html/, 'play.html');
+  const joinUrl = `${baseUrl}?pin=${app.pin}&via=${app.selectedTransport}`;
+
+  // Load QR code library lazily
+  if (!window.qrcode) {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js';
+    script.onerror = () => {
+      console.warn('Failed to load QR code library');
+      return;
+    };
+    document.head.appendChild(script);
+
+    // Wait for script to load
+    await new Promise(resolve => {
+      script.onload = resolve;
+      setTimeout(resolve, 3000); // Timeout after 3s
+    });
+  }
+
+  if (!window.qrcode) return null;
+
+  // Generate QR code
+  try {
+    const qr = window.qrcode(10, 'L');
+    qr.addData(joinUrl);
+    qr.make();
+    return qr.createImgTag(5, 0);
+  } catch (e) {
+    console.warn('QR code generation failed:', e);
+    return null;
+  }
 }
 
 // Export for HTML
@@ -479,7 +734,7 @@ window.hostApp = {
   startGame,
   nextQuestion,
   skipQuestion,
-  togglePause: () => {}, // TODO: pause functionality
+  togglePause,
   endQuestion,
   endGame,
   downloadResults,
@@ -492,4 +747,5 @@ window.hostApp = {
     // Results -> Leaderboard transition
     showScreen('leaderboard');
   },
+  loadLibrary: loadLibraryQuizzes,
 };
