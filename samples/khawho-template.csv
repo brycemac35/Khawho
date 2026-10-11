@@ -1,0 +1,6 @@
+type,question,a1,a2,a3,a4,correct,time
+mc,What is the capital of France?,Paris,Lyon,Marseille,Nice,1,20
+mc,What is 2+2?,4,5,6,7,1,20
+tf,Tokyo is the capital of Japan.,True,False,,,,10
+type,What is the capital of Brazil?,,,,,,30
+poll,What is your favorite color?,Red,Blue,Green,Yellow,,20
