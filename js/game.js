@@ -318,7 +318,7 @@ export function createGame(quiz, settings = {}) {
       if (given !== undefined) {
         answered++;
         if (q.type === 'type') {
-          answerText = String(given.answer ?? '').slice(0, 200);
+          answerText = String(given.answer ?? '').trim().slice(0, 200);
           const n = normalizeText(answerText);
           correct = (q.accepted || []).some(a => normalizeText(a) === n);
           if (n) typed.set(n, (typed.get(n) || 0) + 1);
