@@ -213,7 +213,8 @@ async function playGame(opts) {
     }
 
     // iPad checks on the player question screen
-    if (opts.ipad && qi === 0) {
+    if (opts.ipad && !rec.ipadChecked && quizQ.type !== 'type') {
+      rec.ipadChecked = true;
       const page = players[0].page;
       await shot(page, 'ipad-04-player-question.png');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -229,7 +230,8 @@ async function playGame(opts) {
       await host.click('#pause-button');
       for (const p of players) await p.page.waitForSelector(visible('pause-overlay'));
       ok((await host.textContent('#pause-button')).trim() === 'Resume', `${label}: players see "Paused" and host button reads Resume`);
-      await host.waitForTimeout(4000);
+      await host.waitForTimeout(11000); // longer than the whole 10s time limit
+      ok(await host.isVisible(visible('screen-question')), `${label}: question is still open after pausing longer than its time limit`);
       await host.click('#pause-button');
       for (const p of players) await p.page.waitForSelector('#pause-overlay.hidden', { state: 'attached' });
       rec.pausedQuestion = qi;
@@ -378,7 +380,7 @@ async function playGame(opts) {
     const pausedPlayer = rightP;
     const r = pausedPlayer?.reveals[rec.pausedQuestion];
     const base = r ? r.points - Math.min(500, Math.max(0, r.streak - 1) * 100) : 0; // strip streak bonus
-    ok(r && base >= 930, `${label}: 4s pause on a 10s question was excluded from scoring (time points ${base}; would be <=800 if counted)`);
+    ok(r && r.correct === true && base >= 750, `${label}: 11s pause on a 10s question was excluded from scoring (time points ${base})`);
   }
 
   // ---- nothing about correctness may reach a player before the reveal
@@ -474,6 +476,57 @@ async function localSection(browser, base) {
   }).catch(e => ok(false, 'iPad run completed', e.message));
 }
 
+async function librarySection(browser, base) {
+  section = 'LIBRARY';
+  console.log('\n=== Library tab, password prompt and ?quiz= links (GitHub API mocked) ===');
+  const { encryptQuiz } = await import('../js/crypto.js');
+  const PASSWORD = 'teacher-secret';
+  const encrypted = await encryptQuiz({ ...SAMPLE, id: 'libquiz001', title: 'Library Quiz' }, PASSWORD);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const cors = { 'access-control-allow-origin': '*', 'content-type': 'application/json' };
+  await ctx.route('https://api.github.com/**', route => {
+    const url = route.request().url();
+    if (/\/contents\/quizzes$/.test(url)) {
+      return route.fulfill({ status: 200, headers: cors, body: JSON.stringify([{ name: 'library-quiz-libqui.json', path: 'quizzes/library-quiz-libqui.json', sha: 'abc', type: 'file', url: 'https://api.github.com/repos/brycemac35/Khawho/contents/quizzes/library-quiz-libqui.json?ref=main' }]) });
+    }
+    return route.fulfill({ status: 200, headers: cors, body: JSON.stringify(encrypted) });
+  });
+  const page = watch(await ctx.newPage(), 'library/host');
+  page.setDefaultTimeout(15000);
+  await page.goto(`${base}/host.html?dev=1`);
+  await page.click('#tabbtn-library');
+  await page.waitForSelector('#library-list .quiz-item');
+  const listed = await page.locator('#library-list .quiz-item').first().textContent();
+  ok(listed.includes('Library Quiz') && listed.includes('10 question'), 'library tab lists the encrypted quiz by its clear title/count', listed);
+  await page.click('#library-list .quiz-item');
+  await page.waitForSelector('#library-password-prompt:not(.hidden)');
+  ok(true, 'picking a library quiz without a saved password asks for the teacher password');
+  await page.fill('#library-password', 'not-the-password');
+  await page.click('#library-password-prompt button[type=submit]');
+  await page.waitForSelector('#quiz-error:not(.hidden)');
+  ok(/did not work/i.test(await page.textContent('#quiz-error')), 'wrong password shows a clear error');
+  ok(await page.isVisible(visible('screen-quiz-select')), 'wrong password does not advance');
+  await page.fill('#library-password', PASSWORD);
+  await page.click('#library-password-prompt button[type=submit]');
+  await page.waitForSelector(visible('screen-settings'));
+  ok((await page.textContent('#settings-quiz-title')).includes('Library Quiz'), 'right password opens the quiz in settings');
+  await shot(page, 'library-settings.png');
+
+  await page.goto(`${base}/host.html?dev=1&quiz=lib:quizzes/library-quiz-libqui.json`);
+  await page.waitForSelector(visible('screen-settings'));
+  ok(true, '?quiz=lib:<path> opens straight to settings using the remembered password');
+
+  await page.goto(`${base}/host.html?dev=1`);
+  await page.evaluate(async (quiz) => (await import('./js/storage.js')).saveLocalQuiz(quiz), SAMPLE);
+  await page.goto(`${base}/host.html?dev=1&quiz=local:${SAMPLE.id}`);
+  await page.waitForSelector(visible('screen-settings'));
+  ok((await page.textContent('#settings-quiz-title')).includes(SAMPLE.title), '?quiz=local:<id> opens straight to settings');
+  await page.goto(`${base}/host.html?dev=1&quiz=local:nope`);
+  await page.waitForSelector('#quiz-error:not(.hidden)');
+  ok(true, '?quiz=local:<unknown id> shows a friendly error');
+  await ctx.close();
+}
+
 async function peerSection(browser, base) {
   section = 'PEERJS';
   console.log('\n=== REAL PeerJS transport (separate browser contexts) ===');
@@ -501,6 +554,9 @@ const browser = await chromium.launch({ executablePath: CHROME_PATH, headless: t
 try {
   if (which === 'all' || which === 'local') {
     try { await localSection(browser, base); } catch (e) { ok(false, 'LOCAL flow completed', e.stack.split('\n').slice(0, 3).join(' | ')); }
+  }
+  if (which === 'all' || which === 'local' || which === 'library') {
+    try { await librarySection(browser, base); } catch (e) { ok(false, 'LIBRARY flow completed', e.stack.split('\n').slice(0, 3).join(' | ')); }
   }
   if (which === 'all' || which === 'peerjs') {
     try { await peerSection(browser, base); } catch (e) { ok(false, 'PeerJS flow completed', e.message); }
