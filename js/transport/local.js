@@ -160,6 +160,7 @@ export async function joinGame(pin, opts = {}) {
 
   const bc = new BroadcastChannel(`khawho-${pin}`);
   let closed = false;
+  const messageBuffer = [];
 
   const conn = {
     id: connId,
@@ -173,6 +174,11 @@ export async function joinGame(pin, opts = {}) {
 
     onMessage(cb) {
       this._onMessage = cb;
+      // Flush any buffered messages
+      while (messageBuffer.length > 0) {
+        const msg = messageBuffer.shift();
+        cb(msg);
+      }
     },
 
     onClose(cb) {
@@ -194,6 +200,9 @@ export async function joinGame(pin, opts = {}) {
     if (data?.connId === connId && data?.t !== 'ack') {
       if (conn._onMessage) {
         conn._onMessage(data);
+      } else {
+        // Buffer message until onMessage is registered
+        messageBuffer.push(data);
       }
     }
     if (data?.t === 'close' && data?.connId === connId) {
@@ -236,6 +245,5 @@ export async function joinGame(pin, opts = {}) {
 
   await ackPromise;
 
-  bc.addEventListener('message', messageHandler);
   return conn;
 }

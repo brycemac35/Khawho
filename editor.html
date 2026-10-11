@@ -5,16 +5,181 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Quiz Editor — Khawho</title>
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/editor.css" />
   </head>
   <body>
     <header>
       <a href="index.html" class="header-back">← Back</a>
       <h1 class="header-title">Quiz Editor</h1>
+      <div style="flex: 1"></div>
+      <div class="autosave-indicator" id="autosaveIndicator"></div>
+      <button class="btn btn-secondary" id="settingsBtn">⚙ Settings</button>
     </header>
-    <main class="page-content coming-soon">
-      <h2>Coming soon</h2>
-      <p>Quiz editor is being built.</p>
+
+    <main class="page-content">
+      <div class="editor-container">
+        <!-- Sidebar: Quiz List -->
+        <aside class="editor-sidebar">
+          <div class="tabs">
+            <button class="tab active" data-tab="my-quizzes">My Quizzes</button>
+            <button class="tab" data-tab="library">Library</button>
+          </div>
+
+          <!-- My Quizzes Tab -->
+          <div class="tab-content active" id="my-quizzes-tab">
+            <button class="btn btn-primary btn-full" id="newQuizBtn">+ New Quiz</button>
+            <button class="btn btn-secondary btn-full" id="importBtn">Import</button>
+            <div class="search-bar">
+              <input type="text" id="myQuizzesSearch" placeholder="Search my quizzes..." />
+            </div>
+            <div class="quiz-list" id="myQuizzesList"></div>
+          </div>
+
+          <!-- Library Tab -->
+          <div class="tab-content" id="library-tab">
+            <div class="search-bar">
+              <input type="text" id="librarySearch" placeholder="Search library..." />
+            </div>
+            <div id="libraryStatus"></div>
+            <div class="quiz-list" id="libraryList"></div>
+          </div>
+        </aside>
+
+        <!-- Main: Quiz Editor -->
+        <main class="editor-main" id="editorMain">
+          <div id="noQuizSelected" class="coming-soon" style="flex: 1; justify-content: center">
+            <h2>No quiz selected</h2>
+            <p>Create or select a quiz to get started.</p>
+          </div>
+
+          <div id="quizEditor" style="display: none">
+            <!-- Quiz metadata -->
+            <div class="form-group">
+              <label for="quizTitle">Quiz Title</label>
+              <input type="text" id="quizTitle" placeholder="Enter quiz title..." />
+            </div>
+
+            <div class="form-group">
+              <label for="quizAuthor">Author</label>
+              <input type="text" id="quizAuthor" placeholder="Your name..." />
+            </div>
+
+            <!-- Validation messages -->
+            <div id="validationMessages"></div>
+
+            <!-- Quiz questions -->
+            <div class="form-group">
+              <label>Questions</label>
+              <button class="btn btn-primary" id="addQuestionBtn">+ Add Question</button>
+            </div>
+
+            <div id="questionsList"></div>
+
+            <!-- Action buttons -->
+            <div class="flex gap-lg" style="margin-top: var(--spacing-lg)">
+              <button class="btn btn-secondary" id="exportJsonBtn">📥 Export JSON</button>
+              <button class="btn btn-secondary" id="exportCsvBtn">📥 Export CSV</button>
+              <button class="btn" id="hostBtn" style="background: var(--color-green); color: white">
+                🎮 Host This Quiz
+              </button>
+              <button class="btn btn-primary" id="saveLibraryBtn">☁ Save to Library</button>
+              <button class="btn" id="deleteBtn" style="background: #e74c3c; color: white">🗑 Delete</button>
+            </div>
+          </div>
+        </main>
+      </div>
+
+      <!-- Settings Panel -->
+      <div class="settings-panel" id="settingsPanel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-lg)">
+          <h2>Settings</h2>
+          <button class="btn btn-secondary" id="closeSettingsBtn">✕</button>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Teacher Password</div>
+          <div class="form-group">
+            <input type="password" id="passwordInput" placeholder="Enter teacher password..." />
+          </div>
+          <div class="flex gap-md">
+            <button class="btn btn-primary" id="setPasswordBtn">Set Password</button>
+            <button class="btn btn-secondary" id="forgetPasswordBtn">Forget</button>
+          </div>
+          <div class="settings-help">Used to encrypt quizzes in the shared library.</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">GitHub Token</div>
+          <div class="form-group">
+            <input type="password" id="tokenInput" placeholder="Paste your GitHub token..." />
+          </div>
+          <div class="flex gap-md">
+            <button class="btn btn-primary" id="checkTokenBtn">Check Token</button>
+            <button class="btn btn-secondary" id="forgetTokenBtn">Forget</button>
+          </div>
+          <div id="tokenStatus"></div>
+          <div class="settings-help">
+            To get a token:
+            <div class="token-steps">
+              <ol>
+                <li>Go to github.com → Settings → Developer settings → Fine-grained tokens</li>
+                <li>Click "Generate new token"</li>
+                <li>Repository access: select only "brycemac35/Khawho"</li>
+                <li>Permissions: Contents - Read and write</li>
+                <li>Generate and copy the token</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
+
+    <!-- Modals -->
+    <div class="modal-overlay" id="importModal">
+      <div class="modal">
+        <div class="modal-title">Import Quiz</div>
+        <div class="modal-content">
+          <div class="flex gap-md" style="margin-bottom: var(--spacing-lg)">
+            <button class="btn btn-primary flex-1" id="importJsonBtn">JSON</button>
+            <button class="btn btn-primary flex-1" id="importCsvBtn">CSV</button>
+            <button class="btn btn-primary flex-1" id="importXlsxBtn">Kahoot XLSX</button>
+            <button class="btn btn-primary flex-1" id="loadSampleBtn">Sample</button>
+          </div>
+          <input type="file" id="importFile" accept=".json,.csv,.xlsx" style="display: none" />
+          <div id="importStatus"></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="closeImportBtn">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="passwordModal">
+      <div class="modal">
+        <div class="modal-title">Enter Teacher Password</div>
+        <div class="modal-content">
+          <div class="form-group">
+            <input type="password" id="passwordPromptInput" placeholder="Enter password..." />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="cancelPasswordBtn">Cancel</button>
+          <button class="btn btn-primary" id="submitPasswordBtn">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="confirmModal">
+      <div class="modal">
+        <div class="modal-title" id="confirmTitle">Confirm</div>
+        <div class="modal-content" id="confirmMessage"></div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="cancelConfirmBtn">Cancel</button>
+          <button class="btn btn-primary" id="confirmBtn">Confirm</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="js/editor.js"></script>
   </body>
 </html>

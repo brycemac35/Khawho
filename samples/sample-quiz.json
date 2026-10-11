@@ -1,0 +1,132 @@
+{
+  "format": "khawho-quiz",
+  "v": 1,
+  "id": "sample001a",
+  "title": "World Capitals",
+  "author": "Quiz Master",
+  "updated": "2025-01-01T00:00:00Z",
+  "questions": [
+    {
+      "type": "mc",
+      "text": "What is the capital of France?",
+      "image": null,
+      "timeLimit": 20,
+      "points": "standard",
+      "answers": [
+        { "text": "Paris", "correct": true },
+        { "text": "Lyon", "correct": false },
+        { "text": "Marseille", "correct": false },
+        { "text": "Nice", "correct": false }
+      ]
+    },
+    {
+      "type": "mc",
+      "text": "Which countries have the same capital?",
+      "image": null,
+      "timeLimit": 30,
+      "points": "double",
+      "answers": [
+        { "text": "Austria and Belgium", "correct": false },
+        { "text": "Germany and Austria", "correct": false },
+        { "text": "Serbia and Montenegro", "correct": true },
+        { "text": "Spain and Portugal", "correct": false }
+      ]
+    },
+    {
+      "type": "tf",
+      "text": "Tokyo is the capital of Japan.",
+      "image": null,
+      "timeLimit": 10,
+      "points": "standard",
+      "answers": [
+        { "text": "True", "correct": true },
+        { "text": "False", "correct": false }
+      ]
+    },
+    {
+      "type": "mc",
+      "text": "What is the capital of Australia?",
+      "image": null,
+      "timeLimit": 20,
+      "points": "standard",
+      "answers": [
+        { "text": "Sydney", "correct": false },
+        { "text": "Melbourne", "correct": false },
+        { "text": "Canberra", "correct": true },
+        { "text": "Brisbane", "correct": false }
+      ]
+    },
+    {
+      "type": "type",
+      "text": "What is the capital of Brazil? (Do not include accent marks)",
+      "image": null,
+      "timeLimit": 30,
+      "points": "standard",
+      "answers": [],
+      "accepted": ["brasilia", "brasília"]
+    },
+    {
+      "type": "mc",
+      "text": "Which of these is a capital city in Africa?",
+      "image": null,
+      "timeLimit": 25,
+      "points": "standard",
+      "answers": [
+        { "text": "Cairo", "correct": true },
+        { "text": "Nairobi", "correct": true },
+        { "text": "Cape Town", "correct": false },
+        { "text": "Lagos", "correct": false }
+      ]
+    },
+    {
+      "type": "mc",
+      "text": "What is the capital of Canada?",
+      "image": null,
+      "timeLimit": 20,
+      "points": "standard",
+      "answers": [
+        { "text": "Toronto", "correct": false },
+        { "text": "Ottawa", "correct": true },
+        { "text": "Vancouver", "correct": false },
+        { "text": "Montreal", "correct": false }
+      ]
+    },
+    {
+      "type": "mc",
+      "text": "What is the smallest capital city (by area)?",
+      "image": null,
+      "timeLimit": 30,
+      "points": "double",
+      "answers": [
+        { "text": "Luxembourg City", "correct": false },
+        { "text": "Vatican City", "correct": true },
+        { "text": "Singapore", "correct": false },
+        { "text": "Monaco", "correct": false }
+      ]
+    },
+    {
+      "type": "tf",
+      "text": "Delhi is a capital city in South Asia.",
+      "image": null,
+      "timeLimit": 15,
+      "points": "standard",
+      "answers": [
+        { "text": "True", "correct": true },
+        { "text": "False", "correct": false }
+      ]
+    },
+    {
+      "type": "poll",
+      "text": "Which continent has the most capital cities?",
+      "image": null,
+      "timeLimit": 20,
+      "points": "none",
+      "answers": [
+        { "text": "Africa", "correct": false },
+        { "text": "Asia", "correct": false },
+        { "text": "Europe", "correct": false },
+        { "text": "North America", "correct": false }
+      ]
+    }
+  ]
+}

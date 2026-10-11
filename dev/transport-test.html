@@ -71,11 +71,7 @@
 
           <div class="form-group">
             <label for="transport">Transport Kind:</label>
-            <select id="transport">
-              <option value="local">Local (BroadcastChannel)</option>
-              <option value="peerjs">PeerJS</option>
-              <option value="firebase">Firebase</option>
-            </select>
+            <select id="transport"></select>
           </div>
 
           <div class="form-group">
@@ -163,8 +159,24 @@
         statusConnected: document.getElementById('status-connected'),
       };
 
+      // Populate transport options
+      const availableKinds = transport.availableKinds();
+      availableKinds.forEach((item) => {
+        const option = document.createElement('option');
+        option.value = item.kind;
+        option.textContent = item.label;
+        option.disabled = !item.enabled;
+        elements.transportSelect.appendChild(option);
+      });
+
+      // Select first enabled option
+      const firstEnabled = availableKinds.find((k) => k.enabled);
+      if (firstEnabled) {
+        elements.transportSelect.value = firstEnabled.kind;
+      }
+
       let state = {
-        kind: 'local',
+        kind: firstEnabled?.kind || 'peerjs',
         mode: 'host',
         pin: '',
         host: null,
