@@ -5,16 +5,156 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Host — Khawho</title>
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/game.css" />
   </head>
   <body>
     <header>
       <a href="index.html" class="header-back">← Back</a>
       <h1 class="header-title">Host a Game</h1>
     </header>
-    <main class="page-content coming-soon">
-      <h2>Coming soon</h2>
-      <p>Host flow is being built.</p>
+    <main class="page-content">
+      <!-- Quiz Selection Screen -->
+      <div id="screen-quiz-select" class="screen">
+        <div class="container">
+          <h2>Choose a Quiz</h2>
+
+          <div class="tabs">
+            <button class="tab-button active" data-tab="my-quizzes">My Quizzes</button>
+            <button class="tab-button" data-tab="library">Shared Library</button>
+          </div>
+
+          <div id="tab-my-quizzes" class="tab-content active">
+            <div id="my-quizzes-list" class="quiz-list"></div>
+          </div>
+
+          <div id="tab-library" class="tab-content">
+            <div id="library-list" class="quiz-list"></div>
+            <div id="library-password-prompt" class="hidden">
+              <input type="password" id="library-password" placeholder="Teacher password" />
+              <button onclick="hostApp.loadLibrary()" class="btn btn-primary">Load Library</button>
+              <div id="library-error" class="error-message hidden"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Screen -->
+      <div id="screen-settings" class="screen hidden">
+        <div class="container">
+          <h2>Game Settings</h2>
+
+          <div class="form-group">
+            <label>Connection Method</label>
+            <div id="connection-options"></div>
+          </div>
+
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="shuffle-questions" checked />
+              Shuffle question order
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="per-player-order" />
+              Each student gets their own answer order
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="random-names" />
+              Random nicknames only
+            </label>
+          </div>
+
+          <button class="btn btn-primary btn-full" onclick="hostApp.createGame()">
+            Create Game
+          </button>
+        </div>
+      </div>
+
+      <!-- Lobby Screen -->
+      <div id="screen-lobby" class="screen hidden">
+        <div class="lobby-container">
+          <div class="pin-section">
+            <div class="pin-display" id="pin-display"></div>
+            <button class="btn btn-secondary" onclick="hostApp.copyJoinUrl()">Copy Join Link</button>
+          </div>
+
+          <div class="players-section">
+            <h3>Players (<span id="player-count">0</span>)</h3>
+            <div id="players-list" class="players-list"></div>
+          </div>
+
+          <div class="controls">
+            <button id="lock-button" class="btn btn-secondary" onclick="hostApp.toggleLock()">Lock Lobby</button>
+            <button class="btn btn-secondary" onclick="hostApp.toggleMute()">🔊 Sound</button>
+            <button class="btn btn-primary btn-large" onclick="hostApp.startGame()">Start Game</button>
+            <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Question Screen -->
+      <div id="screen-question" class="screen hidden">
+        <div class="question-container">
+          <div class="question-header">
+            <div class="question-number">
+              Question <span id="q-number">1</span> of <span id="q-total">10</span>
+            </div>
+            <div class="countdown" id="countdown-ring"></div>
+          </div>
+
+          <div class="question-content">
+            <h2 id="question-text"></h2>
+            <img id="question-image" class="question-image hidden" />
+          </div>
+
+          <div id="answer-tiles" class="answer-grid"></div>
+
+          <div class="question-controls">
+            <button class="btn btn-secondary" onclick="hostApp.skipQuestion()">Skip</button>
+            <button class="btn btn-secondary" id="pause-button" onclick="hostApp.togglePause()">Pause</button>
+            <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Results Screen -->
+      <div id="screen-results" class="screen hidden">
+        <div class="results-container">
+          <h2>Results</h2>
+          <div id="distribution-chart"></div>
+          <button class="btn btn-primary" onclick="hostApp.nextScreen()">Next</button>
+          <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+        </div>
+      </div>
+
+      <!-- Leaderboard Screen -->
+      <div id="screen-leaderboard" class="screen hidden">
+        <div class="leaderboard-container">
+          <h2>Leaderboard</h2>
+          <div id="leaderboard-list"></div>
+          <button class="btn btn-primary" onclick="hostApp.nextQuestion()">Next Question</button>
+          <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+        </div>
+      </div>
+
+      <!-- Final Screen -->
+      <div id="screen-final" class="screen hidden">
+        <div class="final-container">
+          <h2>Game Over!</h2>
+          <div class="podium" id="podium"></div>
+          <button class="btn btn-primary" onclick="hostApp.downloadResults()">Download Results CSV</button>
+          <div id="final-stats"></div>
+          <button class="btn btn-secondary" onclick="location.reload()">Play Again</button>
+          <a href="index.html" class="btn btn-secondary">Home</a>
+        </div>
+      </div>
     </main>
+
     <script type="module" src="js/host.js"></script>
   </body>
 </html>

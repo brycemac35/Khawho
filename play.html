@@ -2,19 +2,115 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Play — Khawho</title>
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/game.css" />
   </head>
   <body>
-    <header>
-      <a href="index.html" class="header-back">← Back</a>
-      <h1 class="header-title">Join a Game</h1>
-    </header>
-    <main class="page-content coming-soon">
-      <h2>Coming soon</h2>
-      <p>Player flow is being built.</p>
+    <main class="page-content">
+      <!-- PIN Entry Screen -->
+      <div id="screen-pin-entry" class="screen">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>Join a Game</h1>
+            <div class="form-group">
+              <input type="text" id="pin-input" placeholder="Enter PIN" maxlength="6" />
+              <button class="btn btn-primary btn-full" onclick="playerApp.joinGame()">Join</button>
+            </div>
+            <div id="join-error" class="error-message hidden"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nickname Entry Screen -->
+      <div id="screen-nickname" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>Choose Your Name</h1>
+            <div class="form-group">
+              <input type="text" id="nickname-input" placeholder="Your name" maxlength="15" />
+              <button class="btn btn-primary btn-full" onclick="playerApp.submitNickname()">Continue</button>
+            </div>
+            <div id="nickname-error" class="error-message hidden"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Waiting Lobby Screen -->
+      <div id="screen-waiting" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>You're In!</h1>
+            <p id="waiting-name"></p>
+            <p class="text-muted">Waiting for the host to start the game...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Question Screen -->
+      <div id="screen-question" class="screen hidden">
+        <div class="question-container">
+          <div class="question-header">
+            <h2 id="player-question-text"></h2>
+            <img id="player-question-image" class="question-image hidden" />
+          </div>
+
+          <div id="answer-container"></div>
+
+          <div id="submit-section" class="hidden">
+            <button class="btn btn-primary btn-full btn-large" onclick="playerApp.submitAnswer()">
+              Submit Answer
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reveal Screen -->
+      <div id="screen-reveal" class="screen hidden">
+        <div class="reveal-container">
+          <div id="reveal-result" class="reveal-message"></div>
+          <div id="reveal-points"></div>
+          <div id="reveal-streak"></div>
+          <div id="reveal-rank"></div>
+          <p class="text-muted">Next question coming up...</p>
+        </div>
+      </div>
+
+      <!-- Final Results Screen -->
+      <div id="screen-final" class="screen hidden">
+        <div class="final-container">
+          <h1>Game Over!</h1>
+          <div id="final-rank"></div>
+          <div id="final-score"></div>
+          <p class="text-muted">Thanks for playing!</p>
+        </div>
+      </div>
+
+      <!-- Kicked Screen -->
+      <div id="screen-kicked" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>You Were Kicked</h1>
+            <p>The host removed you from the game.</p>
+            <a href="play.html" class="btn btn-primary">Start Over</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reconnecting Screen -->
+      <div id="screen-reconnecting" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>Reconnecting...</h1>
+            <p id="reconnect-status">Attempting to reconnect...</p>
+          </div>
+        </div>
+      </div>
     </main>
+
     <script type="module" src="js/play.js"></script>
   </body>
 </html>
