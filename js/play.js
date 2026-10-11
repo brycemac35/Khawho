@@ -1,408 +1,383 @@
 /**
- * Player flow module - manages PIN entry, nickname, answering, and results
+ * Player flow: PIN -> nickname -> wait -> answer -> reveal -> final.
+ * The player never learns which answer is correct until the host sends the reveal.
  */
 
 import { joinGame } from './transport/index.js';
 import * as protocol from './protocol.js';
+import { randomId } from './rng.js';
 import { playCorrect, playWrong } from './sound.js';
 
-// Global app state
+const SESSION_KEY = 'khawho.session';
+const CLIENT_KEY = 'khawho.clientId';
+const MAX_RECONNECTS = 40;
+
+const params = new URLSearchParams(location.search);
+const debug = params.get('debug') === '1';
+if (debug) window.__khawhoLog = [];
+
 const app = {
-  // Connection
   pin: null,
+  via: params.get('via') || 'peerjs',
   clientId: null,
-  connection: null,
-  playerName: null,
-  currentScore: 0,
-  currentStreak: 0,
-  currentRank: 0,
-
-  // Game state
-  currentQuestion: null,
-  currentAnswer: null,
+  conn: null,
+  name: null,
+  joined: false, // host sent a welcome on this connection
+  closing: false, // deliberate close (kicked / game over): do not reconnect
+  reconnects: 0,
+  question: null,
+  selected: new Set(),
   answered: false,
-  reconnecting: false,
-  reconnectAttempts: 0,
-  maxReconnectAttempts: 30, // ~30 seconds with 1s delay
-
-  // UI state
-  currentScreen: 'pin-entry',
   screens: {},
 };
 
-// Get client ID from localStorage or generate one
+const $ = (id) => document.getElementById(id);
+
+/** Per-tab id so a refresh rejoins as the same player (and tabs stay distinct). */
 function getClientId() {
-  let id = localStorage.getItem('khawho.clientId');
+  let id = sessionStorage.getItem(CLIENT_KEY);
   if (!id) {
-    // Generate a random-ish ID
-    id = 'player-' + Math.random().toString(36).substring(2, 10);
+    id = randomId(8);
+    sessionStorage.setItem(CLIENT_KEY, id);
   }
   return id;
 }
 
-// Initialize
-document.addEventListener('DOMContentLoaded', initApp);
+function loadSession() {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch { return null; }
+}
+
+function saveSession() {
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ pin: app.pin, via: app.via, name: app.name }));
+}
+
+function showScreen(name) {
+  Object.entries(app.screens).forEach(([key, node]) => node.classList.toggle('hidden', key !== name));
+  app.screen = name;
+}
+
+function showError(id, message) {
+  const box = $(id);
+  box.textContent = message || '';
+  box.classList.toggle('hidden', !message);
+}
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v === true ? '' : v);
+  }
+  children.flat().forEach(c => { if (c !== null && c !== undefined) node.append(c); });
+  return node;
+}
 
 function initApp() {
-  console.log('Initializing player app');
-
-  // Cache screens
   app.screens = {
-    pinEntry: document.getElementById('screen-pin-entry'),
-    nickname: document.getElementById('screen-nickname'),
-    waiting: document.getElementById('screen-waiting'),
-    question: document.getElementById('screen-question'),
-    reveal: document.getElementById('screen-reveal'),
-    final: document.getElementById('screen-final'),
-    kicked: document.getElementById('screen-kicked'),
-    reconnecting: document.getElementById('screen-reconnecting'),
+    'pin-entry': $('screen-pin-entry'),
+    nickname: $('screen-nickname'),
+    waiting: $('screen-waiting'),
+    question: $('screen-question'),
+    reveal: $('screen-reveal'),
+    final: $('screen-final'),
+    kicked: $('screen-kicked'),
+    reconnecting: $('screen-reconnecting'),
   };
-
-  // Check if PIN is in URL
-  const params = new URLSearchParams(location.search);
-  const urlPin = params.get('pin');
-  const via = params.get('via') || 'local';
-
-  if (urlPin) {
-    document.getElementById('pin-input').value = urlPin;
-    app.pin = urlPin;
-    localStorage.setItem('khawho.lastPin', urlPin);
-  }
-
-  // Set up keyboard handlers
-  document.getElementById('pin-input').addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') joinPlayerGame();
-  });
-
-  document.getElementById('nickname-input').addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') submitNickname();
-  });
-
-  // Get stored client ID
   app.clientId = getClientId();
 
-  showScreen('pinEntry');
-}
+  $('pin-form').addEventListener('submit', (e) => { e.preventDefault(); joinByPin(); });
+  $('nickname-form').addEventListener('submit', (e) => { e.preventDefault(); submitNickname(); });
 
-function showScreen(screenName) {
-  Object.values(app.screens).forEach(screen => screen.classList.add('hidden'));
-  if (app.screens[screenName]) {
-    app.screens[screenName].classList.remove('hidden');
-  }
-  app.currentScreen = screenName;
-}
+  const urlPin = params.get('pin');
+  const session = loadSession();
+  showScreen('pin-entry');
 
-async function joinPlayerGame() {
-  const pin = document.getElementById('pin-input').value.trim();
-  if (!pin || pin.length !== 6) {
-    showError('pin-entry', 'PIN must be 6 digits');
+  if (session && (!urlPin || urlPin === session.pin)) {
+    // Refresh or lost page: quietly rejoin the same game with the same name.
+    app.pin = session.pin;
+    app.via = session.via || app.via;
+    app.name = session.name;
+    $('pin-input').value = session.pin;
+    reconnect(true);
     return;
   }
+  if (urlPin) $('pin-input').value = urlPin.replace(/\D/g, '').slice(0, 6);
+  $('pin-input').focus();
+}
 
-  const params = new URLSearchParams(location.search);
-  const via = params.get('via') || 'local';
-
-  try {
-    document.getElementById('join-error').classList.add('hidden');
-
-    app.connection = await joinGame(via, pin, { timeoutMs: 10000 });
-    app.pin = pin;
-    localStorage.setItem('khawho.lastPin', pin);
-
-    // Save connection ID for reconnection
-    localStorage.setItem(`khawho.clientId.${pin}`, app.clientId);
-
-    // Listen for messages from host
-    app.connection.onMessage(handleHostMessage);
-    app.connection.onClose(() => {
-      if (!app.reconnecting) {
-        attemptReconnect();
-      }
-    });
-
-    showScreen('nickname');
-  } catch (error) {
-    showError('pin-entry', `Failed to join: ${error.message}`);
+async function joinByPin() {
+  const pin = $('pin-input').value.trim();
+  if (!/^\d{6}$/.test(pin)) {
+    showError('pin-entry-error', 'The PIN is 6 numbers. Check the screen at the front of the room.');
+    return;
   }
+  showError('pin-entry-error', '');
+  const button = $('pin-submit');
+  button.disabled = true;
+  button.textContent = 'Joining…';
+  try {
+    app.pin = pin;
+    app.conn = await joinGame(app.via, pin, { timeoutMs: 10000 });
+    attach(app.conn);
+    showScreen('nickname');
+    $('nickname-input').focus();
+  } catch (error) {
+    showError('pin-entry-error', /not found/i.test(error.message)
+      ? 'No game found with that PIN. Check the number and try again.'
+      : `Could not join: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Join';
+  }
+}
+
+function attach(conn) {
+  conn.onMessage(handleHostMessage);
+  conn.onClose(() => {
+    if (conn !== app.conn || app.closing) return;
+    reconnect(false);
+  });
 }
 
 function submitNickname() {
-  const name = document.getElementById('nickname-input').value.trim();
+  const name = $('nickname-input').value.trim();
   if (!name) {
-    showError('nickname', 'Name is required');
+    showError('nickname-error', 'Please type a name.');
     return;
   }
-
   if (name.length > 15) {
-    showError('nickname', 'Name must be 15 characters or less');
+    showError('nickname-error', 'Names can be up to 15 letters.');
     return;
   }
-
-  app.playerName = name;
-
-  // Send join message to host
-  app.connection.send(protocol.join(name, app.clientId));
-
-  // Show waiting screen
-  showScreen('waiting');
-  document.getElementById('waiting-name').textContent = name;
+  showError('nickname-error', '');
+  app.name = name;
+  $('nickname-submit').disabled = true;
+  app.conn.send(protocol.join(name, app.clientId));
 }
 
 function handleHostMessage(msg) {
-  console.log('Host message:', msg);
-
-  if (msg.t === protocol.MSG_WELCOME) {
-    // Accepted
-    app.playerName = msg.name;
-    app.currentScore = msg.score;
-    showScreen('waiting');
-    document.getElementById('waiting-name').textContent = msg.name;
-  } else if (msg.t === protocol.MSG_REJECT) {
-    showError('nickname', msg.reason);
-  } else if (msg.t === protocol.MSG_LOBBY) {
-    showScreen('waiting');
-  } else if (msg.t === protocol.MSG_QUESTION) {
-    showQuestion(msg);
-  } else if (msg.t === protocol.MSG_ANSWERED) {
-    // Answer acknowledged
-    app.answered = true;
-  } else if (msg.t === protocol.MSG_REVEAL) {
-    showReveal(msg);
-  } else if (msg.t === protocol.MSG_END) {
-    showFinal(msg);
-  } else if (msg.t === protocol.MSG_KICKED) {
-    showScreen('kicked');
-  } else if (msg.t === protocol.MSG_PAUSED) {
-    handlePaused(msg.paused);
+  if (debug) window.__khawhoLog.push(JSON.parse(JSON.stringify(msg)));
+  switch (msg.t) {
+    case protocol.MSG_WELCOME:
+      app.joined = true;
+      app.reconnects = 0;
+      app.name = msg.name;
+      saveSession();
+      $('nickname-submit').disabled = false;
+      $('waiting-name').textContent = msg.name;
+      if (app.screen !== 'question' && app.screen !== 'reveal') showScreen('waiting');
+      break;
+    case protocol.MSG_REJECT:
+      $('nickname-submit').disabled = false;
+      if (app.screen === 'reconnecting' || app.screen === 'pin-entry') {
+        sessionStorage.removeItem(SESSION_KEY);
+        showScreen('nickname');
+      }
+      showError('nickname-error', msg.reason || 'Could not join.');
+      break;
+    case protocol.MSG_LOBBY:
+      showScreen('waiting');
+      break;
+    case protocol.MSG_QUESTION:
+      showQuestion(msg);
+      break;
+    case protocol.MSG_ANSWERED:
+      lockAnswer();
+      break;
+    case protocol.MSG_REVEAL:
+      showReveal(msg);
+      break;
+    case protocol.MSG_END:
+      app.closing = true;
+      sessionStorage.removeItem(SESSION_KEY);
+      showFinal(msg);
+      break;
+    case protocol.MSG_KICKED:
+      app.closing = true;
+      sessionStorage.removeItem(SESSION_KEY);
+      showScreen('kicked');
+      break;
+    case protocol.MSG_PAUSED:
+      $('pause-overlay').classList.toggle('hidden', !msg.paused);
+      break;
+    default:
+      break;
   }
 }
 
-function handlePaused(isPaused) {
-  const container = document.getElementById('answer-container');
-  if (isPaused) {
-    container.innerHTML = '<div class="text-center" style="color: white; font-size: 1.5rem;">⏸ Paused</div>';
-  } else if (app.currentQuestion && !app.answered) {
-    // Restore answer tiles
-    showQuestion(app.currentQuestion);
-  }
-}
+// ---------------------------------------------------------------- questions
 
 function showQuestion(msg) {
-  showScreen('question');
-  app.currentQuestion = msg;
-  app.currentAnswer = null;
+  app.question = msg;
+  app.selected = new Set();
   app.answered = false;
+  $('pause-overlay').classList.add('hidden');
+  $('locked-message').classList.add('hidden');
+  showScreen('question');
 
-  // Display question text
-  document.getElementById('player-question-text').textContent = msg.text;
-
+  $('player-question-text').textContent = msg.text;
+  const img = $('player-question-image');
   if (msg.image) {
-    const img = document.getElementById('player-question-image');
     img.src = msg.image;
     img.classList.remove('hidden');
   } else {
-    document.getElementById('player-question-image').classList.add('hidden');
+    img.removeAttribute('src');
+    img.classList.add('hidden');
   }
 
-  const container = document.getElementById('answer-container');
-  container.innerHTML = '';
+  const container = $('answer-container');
+  container.replaceChildren();
+  const submitSection = $('submit-section');
 
   if (msg.type === 'type') {
-    // Text input
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.placeholder = 'Type your answer';
-    input.id = 'type-answer-input';
-    input.className = 'answer-input';
-    container.appendChild(input);
-    document.getElementById('submit-section').classList.remove('hidden');
-  } else if (msg.type === 'poll' || msg.type === 'mc' || msg.type === 'tf') {
-    // Answer tiles
-    const grid = document.createElement('div');
-    grid.className = 'answer-grid';
-
-    const selectedIds = new Set();
-
-    msg.answers.forEach((ans, i) => {
-      const tile = document.createElement('button');
-      tile.className = 'answer-tile';
-
-      // Add shape and color if present
-      if (ans.shape && ans.color) {
-        const shapeDiv = document.createElement('div');
-        shapeDiv.className = `shape shape--${ans.shape}`;
-        shapeDiv.style.backgroundColor = getColorCss(ans.color);
-        tile.appendChild(shapeDiv);
-      }
-
-      const textDiv = document.createElement('div');
-      textDiv.textContent = ans.text;
-      tile.appendChild(textDiv);
-
-      tile.onclick = () => {
-        if (app.answered) return;
-
-        // Toggle selection
-        if (msg.multi) {
-          tile.classList.toggle('selected');
-          if (tile.classList.contains('selected')) {
-            selectedIds.add(ans.id);
-          } else {
-            selectedIds.delete(ans.id);
-          }
-        } else {
-          // Single select
-          grid.querySelectorAll('.answer-tile').forEach(t => t.classList.remove('selected'));
-          tile.classList.add('selected');
-          selectedIds.clear();
-          selectedIds.add(ans.id);
-
-          // Auto-submit on single select (non-multi)
-          if (!msg.multi) {
-            setTimeout(submitAnswer, 300);
-          }
-        }
-      };
-
-      tile.style.backgroundColor = getColorCss(ans.color || 'red');
-
-      grid.appendChild(tile);
+    const input = el('input', {
+      type: 'text', id: 'type-answer-input', class: 'answer-input', autocomplete: 'off',
+      autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Your answer', placeholder: 'Type your answer',
     });
-
-    container.appendChild(grid);
-
-    if (msg.multi) {
-      document.getElementById('submit-section').classList.remove('hidden');
-    } else {
-      document.getElementById('submit-section').classList.add('hidden');
-    }
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAnswer(); });
+    container.append(input);
+    submitSection.classList.remove('hidden');
+    input.focus();
+    return;
   }
+
+  const grid = el('div', { class: `answer-grid answer-grid--${msg.answers.length}` });
+  msg.answers.forEach(ans => {
+    const tile = el('button', {
+      type: 'button',
+      class: `answer-tile answer-tile--${ans.color}`,
+      'data-id': ans.id,
+      'data-shape': ans.shape,
+      'aria-pressed': 'false',
+    },
+    el('span', { class: `shape shape--${ans.shape}`, 'aria-hidden': 'true' }),
+    el('span', { class: 'tile-text', text: ans.text }));
+    tile.addEventListener('click', () => onTile(tile, ans.id, msg.multi));
+    grid.append(tile);
+  });
+  container.append(grid);
+  submitSection.classList.toggle('hidden', !msg.multi);
+  $('submit-button').disabled = msg.multi;
 }
 
-function getColorCss(colorName) {
-  const colors = {
-    red: 'var(--color-red)',
-    blue: 'var(--color-blue)',
-    yellow: 'var(--color-yellow)',
-    green: 'var(--color-green)',
-  };
-  return colors[colorName] || colorName;
+function onTile(tile, id, multi) {
+  if (app.answered) return;
+  if (multi) {
+    const on = !app.selected.has(id);
+    if (on) app.selected.add(id); else app.selected.delete(id);
+    tile.classList.toggle('selected', on);
+    tile.setAttribute('aria-pressed', on ? 'true' : 'false');
+    $('submit-button').disabled = app.selected.size === 0;
+  } else {
+    app.selected = new Set([id]);
+    tile.classList.add('selected');
+    tile.setAttribute('aria-pressed', 'true');
+    submitAnswer();
+  }
 }
 
 function submitAnswer() {
-  if (app.answered || !app.currentQuestion) return;
-
-  if (app.currentQuestion.type === 'type') {
-    const input = document.getElementById('type-answer-input');
-    app.currentAnswer = input.value;
+  const q = app.question;
+  if (app.answered || !q || !app.conn) return;
+  let answer;
+  if (q.type === 'type') {
+    answer = $('type-answer-input').value;
+    if (!answer.trim()) return;
   } else {
-    const selectedTiles = document.querySelectorAll('.answer-tile.selected');
-    app.currentAnswer = Array.from(selectedTiles).map(tile => {
-      // Find the answer ID by matching the tile
-      const ansText = tile.textContent.trim();
-      return app.currentQuestion.answers.find(ans => ans.text === ansText)?.id;
-    }).filter(id => id);
+    answer = [...app.selected];
+    if (answer.length === 0) return;
   }
-
-  // Send answer to host
-  app.connection.send(protocol.answer(app.currentQuestion.qIndex, app.currentAnswer));
-  app.answered = true;
-
-  // Show locked message
-  const container = document.getElementById('answer-container');
-  container.innerHTML = '<div class="text-center" style="color: white; font-size: 1.5rem;">Answer locked in</div>';
+  app.conn.send(protocol.answer(q.qIndex, answer));
+  lockAnswer();
 }
+
+function lockAnswer() {
+  if (!app.question || app.screen !== 'question') return;
+  app.answered = true;
+  document.querySelectorAll('#answer-container button, #answer-container input').forEach(n => { n.disabled = true; });
+  $('submit-section').classList.add('hidden');
+  $('locked-message').classList.remove('hidden');
+}
+
+// ---------------------------------------------------------------- reveal / end
 
 function showReveal(msg) {
   showScreen('reveal');
-
-  const resultDiv = document.getElementById('reveal-result');
+  const result = $('reveal-result');
   if (msg.correct === true) {
-    resultDiv.textContent = '✓ Correct!';
-    resultDiv.className = 'reveal-message correct';
-    playCorrect();
+    result.textContent = '✓ Correct!';
+    result.className = 'reveal-message correct';
+    safe(playCorrect);
   } else if (msg.correct === false) {
-    resultDiv.textContent = '✗ Wrong';
-    resultDiv.className = 'reveal-message wrong';
-    playWrong();
+    result.textContent = '✗ Not quite';
+    result.className = 'reveal-message wrong';
+    safe(playWrong);
   } else {
-    resultDiv.textContent = '●';
-    resultDiv.className = 'reveal-message';
+    result.textContent = 'Thanks for answering!';
+    result.className = 'reveal-message';
   }
 
-  document.getElementById('reveal-points').innerHTML = msg.points > 0
-    ? `<div class="reveal-points">+${msg.points}</div>`
+  $('reveal-correct').textContent = msg.correct === false && msg.correctText?.length
+    ? `Correct answer: ${msg.correctText.join(' and ')}`
     : '';
+  const points = $('reveal-points');
+  points.replaceChildren();
+  if (msg.points > 0) points.append(el('div', { class: 'reveal-points', text: `+${msg.points}` }));
+  $('reveal-streak').textContent = msg.streak > 1 ? `Streak: ${msg.streak} 🔥` : '';
+  $('reveal-rank').textContent = `Rank: #${msg.rank}`;
+  $('reveal-score').textContent = `Score: ${msg.score}`;
+}
 
-  document.getElementById('reveal-streak').textContent = msg.streak > 0
-    ? `Streak: ${msg.streak} 🔥`
-    : '';
-
-  document.getElementById('reveal-rank').textContent = `Rank: #${msg.rank}`;
-
-  app.currentScore = msg.score;
-  app.currentStreak = msg.streak;
-  app.currentRank = msg.rank;
+function safe(fn) {
+  try { fn(); } catch { /* sound is optional */ }
 }
 
 function showFinal(msg) {
   showScreen('final');
-
-  document.getElementById('final-rank').innerHTML = `
-    <h2>You placed <strong>#${msg.rank}</strong></h2>
-  `;
-
-  document.getElementById('final-score').innerHTML = `
-    <h3>Final Score: <strong>${msg.score}</strong></h3>
-  `;
+  $('final-rank').replaceChildren(el('h2', {}, 'You placed ', el('strong', { text: `#${msg.rank}` })));
+  $('final-score').replaceChildren(el('h3', {}, 'Final score: ', el('strong', { text: String(msg.score) })));
 }
 
-function showError(screenName, message) {
-  const errorEl = document.getElementById(`${screenName}-error`);
-  if (errorEl) {
-    errorEl.textContent = message;
-    errorEl.classList.remove('hidden');
-  } else {
-    alert(message);
-  }
-}
+// ---------------------------------------------------------------- reconnect
 
-async function attemptReconnect() {
-  if (app.reconnecting || !app.pin || app.reconnectAttempts >= app.maxReconnectAttempts) {
-    showScreen('reconnecting');
-    document.getElementById('reconnect-status').textContent = 'Connection lost. Tap to try again.';
-    return;
-  }
-
-  app.reconnecting = true;
-  app.reconnectAttempts++;
+async function reconnect(initial) {
+  if (!app.pin || app.closing) return;
   showScreen('reconnecting');
+  $('reconnect-button').classList.add('hidden');
+  $('reconnect-status').textContent = initial ? 'Rejoining your game…' : 'Connection lost. Trying to get you back in…';
 
-  try {
-    const params = new URLSearchParams(location.search);
-    const via = params.get('via') || 'local';
-
-    app.connection = await joinGame(via, app.pin, { timeoutMs: 2000 });
-
-    // Restore listener
-    app.connection.onMessage(handleHostMessage);
-    app.connection.onClose(() => attemptReconnect());
-
-    // Send rejoin
-    app.connection.send(protocol.join(app.playerName, app.clientId));
-
-    app.reconnecting = false;
-    app.reconnectAttempts = 0;
-    showScreen('waiting');
-  } catch (e) {
-    console.log('Reconnect attempt failed, will retry...');
-    setTimeout(attemptReconnect, 1000);
+  while (!app.closing && app.reconnects < MAX_RECONNECTS) {
+    app.reconnects++;
+    try {
+      const conn = await joinGame(app.via, app.pin, { timeoutMs: 4000 });
+      app.conn = conn;
+      app.joined = false;
+      attach(conn);
+      conn.send(protocol.join(app.name, app.clientId));
+      return; // host replies with welcome (and resends the current question)
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  if (!app.closing) {
+    sessionStorage.removeItem(SESSION_KEY);
+    $('reconnect-status').textContent = initial
+      ? 'That game is no longer running.'
+      : 'We could not reconnect. Check your Wi-Fi and try again.';
+    app.initialFailed = !!initial;
+    $('reconnect-button').textContent = initial ? 'Start over' : 'Try again';
+    $('reconnect-button').classList.remove('hidden');
   }
 }
 
-// Export for HTML
-window.playerApp = {
-  joinGame: joinPlayerGame,
-  submitNickname,
-  submitAnswer,
-};
+function retry() {
+  app.reconnects = 0;
+  if (app.name && app.pin && !app.initialFailed) reconnect(false);
+  else location.href = 'play.html';
+}
+
+window.playerApp = { submitAnswer, retry };
+
+initApp();
