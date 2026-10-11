@@ -7,43 +7,49 @@
       ".write": false,
       "$pin": {
         ".validate": "$pin.matches(/^[0-9]{6}$/)",
-        ".read": false,
-        ".write": false,
+        "$other": { ".validate": false },
+
         "meta": {
           ".read": true,
-          ".write": true,
-          "createdAt": { ".validate": "newData.isString()" },
-          "hostAlive": { ".validate": "newData.isBoolean()" },
-          "hostId": { ".validate": "newData.isString() && newData.val().length < 100" }
+          ".write": "!data.exists() || !newData.exists()",
+          ".validate": "newData.hasChildren(['createdAt', 'hostId'])",
+          "createdAt": { ".validate": "newData.isNumber()" },
+          "hostId": { ".validate": "newData.isString() && newData.val().length <= 64" },
+          "$other": { ".validate": false }
         },
+
         "players": {
-          ".read": false,
-          ".write": false,
+          ".read": true,
+          ".write": true,
           "$connId": {
-            ".read": true,
-            ".write": true,
-            "joinedAt": { ".validate": "newData.isString()" }
+            ".validate": "$connId.matches(/^[0-9a-f]{16}$/) && newData.hasChildren(['joinedAt'])",
+            "joinedAt": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
           }
         },
+
         "toHost": {
-          ".read": false,
-          ".write": false,
+          ".write": true,
           "$connId": {
             ".read": true,
-            ".write": true,
+            ".validate": "$connId.matches(/^[0-9a-f]{16}$/)",
             "$pushId": {
-              ".validate": "newData.hasChildren()"
+              ".validate": "newData.hasChildren(['d']) && newData.child('d').isString() && newData.child('d').val().length <= 1000000",
+              "d": { ".validate": true },
+              "$other": { ".validate": false }
             }
           }
         },
+
         "toPlayer": {
-          ".read": false,
-          ".write": false,
+          ".write": true,
           "$connId": {
             ".read": true,
-            ".write": true,
+            ".validate": "$connId.matches(/^[0-9a-f]{16}$/)",
             "$pushId": {
-              ".validate": "newData.hasChildren()"
+              ".validate": "newData.hasChildren(['d']) && newData.child('d').isString() && newData.child('d').val().length <= 1000000",
+              "d": { ".validate": true },
+              "$other": { ".validate": false }
             }
           }
         }

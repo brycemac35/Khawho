@@ -162,8 +162,8 @@ By default, Khawho uses **PeerJS** (WebRTC peer-to-peer) for host–player commu
 3. **Set up security rules:**
    - In the Realtime Database, click the **Rules** tab
    - Delete the default rules
-   - Copy the rules from `docs/firebase-rules.json` (in this repo)
-   - Paste and publish
+   - Copy the rules from `firebase-rules.json` (in the root of this repo)
+   - Paste and click **Publish**. (These rules let anyone with a 6-digit PIN use that game only; nobody can list or read other games.)
 
 4. **Get your Firebase config:**
    - Left sidebar → **Project Settings** (gear icon)
