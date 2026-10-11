@@ -526,3 +526,16 @@
     transform: none;
   }
 }
+
+/* QR Code */
+.qr-code-container {
+  text-align: center;
+  margin: var(--spacing-lg) 0;
+}
+
+.qr-code-container img {
+  max-width: 200px;
+  border-radius: var(--border-radius);
+  background: white;
+  padding: var(--spacing-md);
+}

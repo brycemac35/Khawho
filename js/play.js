@@ -173,7 +173,17 @@ function handleHostMessage(msg) {
   } else if (msg.t === protocol.MSG_KICKED) {
     showScreen('kicked');
   } else if (msg.t === protocol.MSG_PAUSED) {
-    // Handle pause
+    handlePaused(msg.paused);
+  }
+}
+
+function handlePaused(isPaused) {
+  const container = document.getElementById('answer-container');
+  if (isPaused) {
+    container.innerHTML = '<div class="text-center" style="color: white; font-size: 1.5rem;">⏸ Paused</div>';
+  } else if (app.currentQuestion && !app.answered) {
+    // Restore answer tiles
+    showQuestion(app.currentQuestion);
   }
 }
 
