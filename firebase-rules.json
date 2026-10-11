@@ -1,0 +1,53 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "games": {
+      ".read": false,
+      ".write": false,
+      "$pin": {
+        ".validate": "$pin.matches(/^[0-9]{6}$/)",
+        ".read": false,
+        ".write": false,
+        "meta": {
+          ".read": true,
+          ".write": true,
+          "createdAt": { ".validate": "newData.isString()" },
+          "hostAlive": { ".validate": "newData.isBoolean()" },
+          "hostId": { ".validate": "newData.isString() && newData.val().length < 100" }
+        },
+        "players": {
+          ".read": false,
+          ".write": false,
+          "$connId": {
+            ".read": true,
+            ".write": true,
+            "joinedAt": { ".validate": "newData.isString()" }
+          }
+        },
+        "toHost": {
+          ".read": false,
+          ".write": false,
+          "$connId": {
+            ".read": true,
+            ".write": true,
+            "$pushId": {
+              ".validate": "newData.hasChildren()"
+            }
+          }
+        },
+        "toPlayer": {
+          ".read": false,
+          ".write": false,
+          "$connId": {
+            ".read": true,
+            ".write": true,
+            "$pushId": {
+              ".validate": "newData.hasChildren()"
+            }
+          }
+        }
+      }
+    }
+  }
+}
