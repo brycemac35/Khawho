@@ -1,89 +1,167 @@
 /**
  * Firebase Realtime Database transport — fallback when WebRTC is blocked
  * Contract: createHost(opts) -> host; joinGame(pin, opts) -> conn
+ *
+ * Data layout (see firebase-rules.json, which must match every operation here):
+ *   games/<pin>/meta                         { createdAt, hostId }   (host)
+ *   games/<pin>/players/<connId>             { joinedAt }            (player announces itself)
+ *   games/<pin>/toHost/<connId>/<pushKey>    { d: "<json>" }         (player -> host)
+ *   games/<pin>/toPlayer/<connId>/<pushKey>  { d: "<json>" }         (host -> player)
+ *
+ * Messages are stored as a JSON string in `d` because the Realtime Database
+ * drops empty arrays / nulls and forbids some characters in object keys.
+ * Every message is deleted by its receiver as soon as it has been consumed.
  */
 
 import { FIREBASE_CONFIG } from '../config.js';
 import { randomId } from '../rng.js';
 
 const FIREBASE_VERSION = '10.9.0';
-const FIREBASE_APP_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app.js`;
-const FIREBASE_DB_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-database.js`;
+const FIREBASE_APP_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app-compat.js`;
+const FIREBASE_DB_URL = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-database-compat.js`;
 
-// Global Firebase instances
-let firebaseLoaded = false;
+const STALE_META_MS = 6 * 60 * 60 * 1000;
+const NOT_SET_UP = 'Backup mode is not set up yet — see the README';
+
 let firebaseLoadPromise = null;
 let firebaseApp = null;
 
-/**
- * Load Firebase SDK if not already loaded.
- */
-async function loadFirebase() {
-  if (firebaseLoaded) {
-    return;
-  }
-
-  if (firebaseLoadPromise) {
-    return firebaseLoadPromise;
-  }
-
-  firebaseLoadPromise = new Promise((resolve, reject) => {
-    if (window.firebase && window.firebase.initializeApp) {
-      firebaseLoaded = true;
-      resolve();
-      return;
-    }
-
-    // Load firebase-app first
-    const appScript = document.createElement('script');
-    appScript.src = FIREBASE_APP_URL;
-    appScript.onload = () => {
-      // Then load firebase-database
-      const dbScript = document.createElement('script');
-      dbScript.src = FIREBASE_DB_URL;
-      dbScript.onload = () => {
-        firebaseLoaded = true;
-        resolve();
-      };
-      dbScript.onerror = () => {
-        firebaseLoaded = false;
-        firebaseLoadPromise = null;
-        reject(new Error('Failed to load Firebase database library'));
-      };
-      document.head.appendChild(dbScript);
-    };
-    appScript.onerror = () => {
-      firebaseLoaded = false;
-      firebaseLoadPromise = null;
-      reject(new Error('Failed to load Firebase library'));
-    };
-    document.head.appendChild(appScript);
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load the Backup mode library — check your connection'));
+    document.head.appendChild(s);
   });
+}
 
+/**
+ * Load the Firebase compat SDK (classic scripts) if not already loaded.
+ */
+function loadFirebase() {
+  if (window.firebase && window.firebase.initializeApp && window.firebase.database) {
+    return Promise.resolve();
+  }
+  if (!firebaseLoadPromise) {
+    firebaseLoadPromise = (async () => {
+      await loadScript(FIREBASE_APP_URL);
+      await loadScript(FIREBASE_DB_URL);
+      if (!window.firebase || !window.firebase.database) {
+        throw new Error('Failed to load the Backup mode library');
+      }
+    })().catch((err) => {
+      firebaseLoadPromise = null; // allow retry
+      throw err;
+    });
+  }
   return firebaseLoadPromise;
 }
 
 /**
- * Get or initialize Firebase app.
+ * Get or initialize the Firebase app (one per page).
  */
 function getFirebaseApp() {
-  if (!FIREBASE_CONFIG) {
-    throw new Error('Backup mode is not set up yet — see the README');
-  }
-
-  if (firebaseApp) {
-    return firebaseApp;
-  }
-
-  const firebase = window.firebase;
-  const appName = `khawho-${randomId()}`;
-
+  if (!FIREBASE_CONFIG) throw new Error(NOT_SET_UP);
+  if (firebaseApp) return firebaseApp;
   try {
-    firebaseApp = firebase.initializeApp(FIREBASE_CONFIG, appName);
+    firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG, `khawho-${randomId()}`);
     return firebaseApp;
   } catch (err) {
     throw new Error(`Failed to initialize Firebase: ${err.message}`);
   }
+}
+
+async function getDb() {
+  if (!FIREBASE_CONFIG) throw new Error(NOT_SET_UP);
+  await loadFirebase();
+  return getFirebaseApp().database();
+}
+
+function encode(obj) {
+  return { d: JSON.stringify(obj) };
+}
+
+function decode(snapshot) {
+  const val = snapshot.val();
+  if (!val || typeof val.d !== 'string') return null;
+  try {
+    const obj = JSON.parse(val.d);
+    return obj && typeof obj === 'object' ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Convert Firebase errors into plain-language messages. */
+function friendly(err, fallback) {
+  const code = err && err.code ? String(err.code) : '';
+  if (/permission/i.test(code) || /permission_denied/i.test(String(err && err.message))) {
+    return new Error('Backup mode was refused by the server — the database rules may be wrong (see the README)');
+  }
+  return err instanceof Error && err.message ? err : new Error(fallback);
+}
+
+const PIN_RE = /^[0-9]{6}$/;
+
+/**
+ * A connection object shared by host side and player side.
+ * `incoming` is the ref messages arrive on; `outgoing` is where send() pushes.
+ * `cleanup` runs once on close (removes data); `onDetach` stops listeners.
+ */
+function createConnection({ id, incoming, outgoing, cleanup }) {
+  let closed = false;
+  let onMessageCb = null;
+  let onCloseCb = null;
+  const buffer = [];
+
+  const listener = incoming.on(
+    'child_added',
+    (snap) => {
+      if (closed) return;
+      const msg = decode(snap);
+      // Consume-and-delete, whether or not it could be decoded.
+      snap.ref.remove().catch(() => {});
+      if (!msg) return;
+      if (onMessageCb) onMessageCb(msg);
+      else buffer.push(msg);
+    },
+    () => {} // listen cancelled (permission denied etc.): nothing to do
+  );
+
+  const conn = {
+    id,
+    send(obj) {
+      if (closed) return;
+      outgoing.push(encode(obj)).catch(() => {});
+    },
+    onMessage(cb) {
+      onMessageCb = cb;
+      while (buffer.length > 0 && onMessageCb === cb) cb(buffer.shift());
+    },
+    onClose(cb) {
+      onCloseCb = cb;
+    },
+    close() {
+      conn._finish(true);
+    },
+    /** @private Close this side; `local` = removes shared data too. */
+    _finish(local) {
+      if (closed) return;
+      closed = true;
+      incoming.off('child_added', listener);
+      if (local) cleanup();
+      if (onCloseCb) {
+        const cb = onCloseCb;
+        onCloseCb = null;
+        cb();
+      }
+    },
+    get closed() {
+      return closed;
+    },
+  };
+  return conn;
 }
 
 /**
@@ -92,177 +170,127 @@ function getFirebaseApp() {
  * @returns {Promise<Host>}
  */
 export async function createHost(opts) {
-  const { pin } = opts;
+  const { pin } = opts || {};
   if (!pin) throw new Error('pin required');
+  if (!PIN_RE.test(String(pin))) throw new Error('PIN must be 6 digits');
 
-  if (!FIREBASE_CONFIG) {
-    throw new Error('Backup mode is not set up yet — see the README');
-  }
-
-  await loadFirebase();
-
-  const app = getFirebaseApp();
-  const db = window.firebase.database(app);
-  const metaPath = `games/${pin}/meta`;
-
-  let closed = false;
+  const db = await getDb();
+  const gameRef = db.ref(`games/${pin}`);
+  const metaRef = gameRef.child('meta');
+  const playersRef = gameRef.child('players');
+  const toHostRef = gameRef.child('toHost');
+  const toPlayerRef = gameRef.child('toPlayer');
   const hostId = randomId();
-  const connections = new Map();
-  let onConnection = null;
 
-  try {
-    // Check if game already exists
-    const metaRef = db.ref(metaPath);
-    const snapshot = await metaRef.get();
+  // The four per-game nodes. Each is removed separately because the rules
+  // grant write on these nodes, not on games/<pin> itself.
+  const gameNodes = [metaRef, playersRef, toHostRef, toPlayerRef];
 
-    if (snapshot.exists()) {
-      const meta = snapshot.val();
-      const createdAt = new Date(meta.createdAt).getTime();
-      const now = Date.now();
-      const sixHoursMs = 6 * 60 * 60 * 1000;
-
-      if (now - createdAt < sixHoursMs) {
+  const claim = async () => {
+    // Is the PIN already in use by a recent game?
+    const existing = await metaRef.get();
+    if (existing.exists()) {
+      const createdAt = Number(existing.val() && existing.val().createdAt);
+      if (Number.isFinite(createdAt) && Date.now() - createdAt < STALE_META_MS) {
         throw new Error('That game PIN is already in use');
       }
+      // Stale leftovers from a crashed host: clear them out first.
+      await Promise.all(gameNodes.map((r) => r.remove()));
     }
 
-    // Set meta and configure onDisconnect
-    await metaRef.set({
-      createdAt: new Date().toISOString(),
-      hostAlive: true,
-      hostId,
-    });
+    // Claim the PIN atomically (rules only allow creating meta when absent).
+    const result = await metaRef.transaction((current) => {
+      if (current !== null) return undefined; // abort: someone else claimed it
+      return { createdAt: window.firebase.database.ServerValue.TIMESTAMP, hostId };
+    }, undefined, false);
+    if (!result.committed) throw new Error('That game PIN is already in use');
+  };
 
-    // Clean up on disconnect
-    metaRef.onDisconnect().remove();
-
-    // Listen for new players
-    const playersPath = `games/${pin}/players`;
-    const playersRef = db.ref(playersPath);
-
-    playersRef.on('child_added', (snapshot) => {
-      if (closed) return;
-
-      const connId = snapshot.key;
-      const playerData = snapshot.val();
-
-      // Create connection object
-      const hostConn = createHostConnection(db, pin, connId);
-      connections.set(connId, hostConn);
-
-      if (onConnection) {
-        onConnection(hostConn);
-      }
-    });
-
-    // Listen for messages to host
-    const toHostPath = `games/${pin}/toHost`;
-    const toHostRef = db.ref(toHostPath);
-
-    toHostRef.on('child_added', (snapshot) => {
-      if (closed) return;
-
-      const connId = snapshot.key;
-      const messages = snapshot.val();
-      const conn = connections.get(connId);
-
-      if (conn && messages) {
-        // Get individual messages
-        Object.entries(messages).forEach(([pushId, msg]) => {
-          if (msg && typeof msg === 'object') {
-            conn._receiveMessage(msg);
-            // Delete the message after reading
-            db.ref(`games/${pin}/toHost/${connId}/${pushId}`).remove();
-          }
-        });
-      }
-    });
+  // Without a connection the SDK waits forever, so give up after a while.
+  let timer;
+  try {
+    await Promise.race([
+      claim(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Could not reach the Backup server — check your connection')), opts.timeoutMs || 10000);
+      }),
+    ]);
   } catch (err) {
-    throw err;
+    throw friendly(err, 'Could not reach the Backup server');
+  } finally {
+    clearTimeout(timer);
   }
 
-  const host = {
+  // If the host vanishes (tab closed, network lost) the server cleans up.
+  gameNodes.forEach((r) => r.onDisconnect().remove());
+
+  let closed = false;
+  let onConnection = null;
+  const connections = new Map();
+
+  const delivered = new Set();
+  const deliver = (conn) => {
+    if (!onConnection || delivered.has(conn.id)) return;
+    delivered.add(conn.id);
+    onConnection(conn);
+  };
+
+  const forget = (connId) => {
+    const c = connections.get(connId);
+    if (c) {
+      connections.delete(connId);
+      c._finish(false);
+    }
+  };
+
+  playersRef.on(
+    'child_added',
+    (snap) => {
+      if (closed) return;
+      const connId = snap.key;
+      if (connections.has(connId)) return;
+      const conn = createConnection({
+        id: connId,
+        incoming: toHostRef.child(connId),
+        outgoing: toPlayerRef.child(connId),
+        cleanup: () => {
+          connections.delete(connId);
+          playersRef.child(connId).remove().catch(() => {});
+          toHostRef.child(connId).remove().catch(() => {});
+          toPlayerRef.child(connId).remove().catch(() => {});
+        },
+      });
+      connections.set(connId, conn);
+      deliver(conn);
+    },
+    () => {}
+  );
+
+  // Player removed its announcement (left / disconnected): close its connection.
+  playersRef.on('child_removed', (snap) => {
+    if (closed) return;
+    const connId = snap.key;
+    forget(connId);
+    toHostRef.child(connId).remove().catch(() => {});
+    toPlayerRef.child(connId).remove().catch(() => {});
+  });
+
+  return {
     pin,
     onConnection(cb) {
       onConnection = cb;
+      // Deliver connections that arrived before the callback was registered.
+      connections.forEach((c) => deliver(c));
     },
     close() {
       if (closed) return;
       closed = true;
-
-      connections.forEach((conn) => {
-        if (conn._onClose) {
-          conn._onClose();
-        }
-      });
+      playersRef.off();
+      const open = Array.from(connections.values());
       connections.clear();
-
-      // Clean up game data
-      const gameRef = db.ref(`games/${pin}`);
-      gameRef.remove();
-    },
-  };
-
-  return host;
-}
-
-/**
- * Create a connection object for the host side.
- */
-function createHostConnection(db, pin, connId) {
-  let closed = false;
-  let onMessageCb = null;
-  let onCloseCb = null;
-  const messageBuffer = [];
-
-  return {
-    id: connId,
-    _onMessage: null,
-    _onClose: null,
-
-    _receiveMessage(data) {
-      if (closed) return;
-
-      if (onMessageCb) {
-        onMessageCb(data);
-      } else {
-        // Buffer message until onMessage is registered
-        messageBuffer.push(data);
-      }
-    },
-
-    send(obj) {
-      if (closed) return;
-
-      const pushId = randomId();
-      const playerMsgRef = db.ref(`games/${pin}/toPlayer/${connId}/${pushId}`);
-      playerMsgRef.set(obj);
-    },
-
-    onMessage(cb) {
-      onMessageCb = cb;
-      // Flush any buffered messages
-      while (messageBuffer.length > 0) {
-        const msg = messageBuffer.shift();
-        cb(msg);
-      }
-    },
-
-    onClose(cb) {
-      onCloseCb = cb;
-    },
-
-    close() {
-      if (closed) return;
-      closed = true;
-
-      // Remove player connection
-      const playerRef = db.ref(`games/${pin}/players/${connId}`);
-      playerRef.remove();
-
-      if (onCloseCb) {
-        onCloseCb();
-      }
+      open.forEach((c) => c._finish(false));
+      gameNodes.forEach((r) => r.onDisconnect().cancel().catch(() => {}));
+      gameNodes.forEach((r) => r.remove().catch(() => {}));
     },
   };
 }
@@ -275,116 +303,87 @@ function createHostConnection(db, pin, connId) {
  */
 export async function joinGame(pin, opts = {}) {
   const { timeoutMs = 10000 } = opts;
+  if (!PIN_RE.test(String(pin))) throw new Error('Game not found — check the PIN');
 
-  if (!FIREBASE_CONFIG) {
-    throw new Error('Backup mode is not set up yet — see the README');
-  }
-
-  await loadFirebase();
-
-  const app = getFirebaseApp();
-  const db = window.firebase.database(app);
+  const db = await getDb();
+  const gameRef = db.ref(`games/${pin}`);
+  const metaRef = gameRef.child('meta');
   const connId = randomId();
+  const playerRef = gameRef.child('players').child(connId);
+  const toHostRef = gameRef.child('toHost').child(connId);
+  const toPlayerRef = gameRef.child('toPlayer').child(connId);
 
-  let closed = false;
-  let onMessageCb = null;
-  let onCloseCb = null;
-  const messageBuffer = [];
-
+  // 1. The host must exist before we announce ourselves.
+  let timer;
   try {
-    // Verify host exists
-    const metaPath = `games/${pin}/meta`;
-    const metaRef = db.ref(metaPath);
-
-    const hostCheckPromise = Promise.race([
-      new Promise((resolve, reject) => {
-        metaRef.get().then((snapshot) => {
-          if (!snapshot.exists()) {
-            reject(new Error('Game not found — check the PIN'));
-          } else {
-            resolve();
-          }
-        });
-      }),
+    const snap = await Promise.race([
+      metaRef.get(),
       new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(new Error('Game not found — check the PIN'));
-        }, timeoutMs);
+        timer = setTimeout(() => reject(new Error('Could not reach the game — check your connection')), timeoutMs);
       }),
     ]);
-
-    await hostCheckPromise;
-
-    // Announce player
-    const playerRef = db.ref(`games/${pin}/players/${connId}`);
-    await playerRef.set({
-      joinedAt: new Date().toISOString(),
-    });
-
-    // Set up onDisconnect to remove player
-    playerRef.onDisconnect().remove();
-
-    // Listen for messages to this player
-    const toPlayerPath = `games/${pin}/toPlayer/${connId}`;
-    const toPlayerRef = db.ref(toPlayerPath);
-
-    toPlayerRef.on('child_added', (snapshot) => {
-      if (closed) return;
-
-      const pushId = snapshot.key;
-      const msg = snapshot.val();
-
-      if (msg && typeof msg === 'object') {
-        if (onMessageCb) {
-          onMessageCb(msg);
-        } else {
-          // Buffer message until onMessage is registered
-          messageBuffer.push(msg);
-        }
-
-        // Delete the message after reading
-        db.ref(`games/${pin}/toPlayer/${connId}/${pushId}`).remove();
-      }
-    });
+    if (!snap.exists()) throw new Error('Game not found — check the PIN');
   } catch (err) {
-    throw err;
+    throw friendly(err, 'Could not reach the game — check your connection');
+  } finally {
+    clearTimeout(timer);
   }
 
-  return {
+  // 2. Build the connection (starts listening on toPlayer/<connId>) before announcing,
+  //    so nothing the host sends right after it sees us is missed.
+  const conn = createConnection({
     id: connId,
-
-    send(obj) {
-      if (closed) return;
-
-      const pushId = randomId();
-      const hostMsgRef = db.ref(`games/${pin}/toHost/${connId}/${pushId}`);
-      hostMsgRef.set(obj);
+    incoming: toPlayerRef,
+    outgoing: toHostRef,
+    cleanup: () => {
+      playerRef.remove().catch(() => {});
+      toHostRef.remove().catch(() => {});
+      toPlayerRef.remove().catch(() => {});
     },
+  });
 
-    onMessage(cb) {
-      onMessageCb = cb;
-      // Flush any buffered messages
-      while (messageBuffer.length > 0) {
-        const msg = messageBuffer.shift();
-        cb(msg);
-      }
-    },
+  // If this tab goes away, the server removes everything that belongs to us.
+  try {
+    await Promise.all([
+      playerRef.onDisconnect().remove(),
+      toHostRef.onDisconnect().remove(),
+      toPlayerRef.onDisconnect().remove(),
+    ]);
+    await playerRef.set({ joinedAt: window.firebase.database.ServerValue.TIMESTAMP });
+  } catch (err) {
+    conn._finish(true);
+    throw friendly(err, 'Could not join the game');
+  }
 
-    onClose(cb) {
-      onCloseCb = cb;
-    },
-
-    close() {
-      if (closed) return;
-      closed = true;
-
-      // Remove player connection
-      const playerRef = db.ref(`games/${pin}/players/${connId}`);
-      playerRef.remove();
-
-      if (onCloseCb) {
-        onCloseCb();
-      }
-    },
+  // 3. Detect the host closing us (kick / host left): our announcement or the
+  //    game's meta disappears.
+  let watching = true;
+  const stopWatching = () => {
+    if (!watching) return;
+    watching = false;
+    playerRef.off('value', onPlayer);
+    metaRef.off('value', onMeta);
   };
+  const onPlayer = (snap) => {
+    if (!snap.exists() && !conn.closed) {
+      stopWatching();
+      conn._finish(true);
+    }
+  };
+  const onMeta = (snap) => {
+    if (!snap.exists() && !conn.closed) {
+      stopWatching();
+      conn._finish(true);
+    }
+  };
+  playerRef.on('value', onPlayer, () => {});
+  metaRef.on('value', onMeta, () => {});
+
+  const baseClose = conn.close;
+  conn.close = () => {
+    stopWatching();
+    baseClose();
+  };
+
+  return conn;
 }
