@@ -1,0 +1,9 @@
+{
+  "name": "khawho",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A classroom quiz game with truly random answer order",
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}
