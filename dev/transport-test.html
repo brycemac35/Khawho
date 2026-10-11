@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transport Test — Khawho Dev</title>
+    <link rel="stylesheet" href="../css/style.css" />
+    <style>
+      .test-container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: var(--spacing-lg);
+      }
+
+      .log {
+        background: rgba(0, 0, 0, 0.3);
+        padding: var(--spacing-md);
+        border-radius: var(--border-radius);
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+        max-height: 300px;
+        overflow-y: auto;
+        margin-bottom: var(--spacing-lg);
+        color: #00ff00;
+        word-wrap: break-word;
+      }
+
+      .log-entry {
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .log-entry.error {
+        color: #ff6b6b;
+      }
+
+      .log-entry.info {
+        color: #74c0fc;
+      }
+
+      .message-box {
+        display: flex;
+        gap: var(--spacing-sm);
+      }
+
+      .message-box input {
+        flex: 1;
+      }
+
+      .button-group {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-bottom: var(--spacing-md);
+        flex-wrap: wrap;
+      }
+
+      .button-group button {
+        padding: var(--spacing-sm) var(--spacing-md);
+        font-size: var(--font-size-base);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a href="../index.html" class="header-back">← Back</a>
+      <h1 class="header-title">Transport Test</h1>
+    </header>
+    <main class="page-content">
+      <div class="test-container">
+        <div class="card">
+          <h2 class="card-title">Configuration</h2>
+
+          <div class="form-group">
+            <label for="transport">Transport Kind:</label>
+            <select id="transport">
+              <option value="local">Local (BroadcastChannel)</option>
+              <option value="peerjs">PeerJS</option>
+              <option value="firebase">Firebase</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="mode">Mode:</label>
+            <div class="flex gap-md">
+              <label>
+                <input type="radio" name="mode" value="host" checked /> Host
+              </label>
+              <label>
+                <input type="radio" name="mode" value="join" /> Join
+              </label>
+            </div>
+          </div>
+
+          <div id="pin-input-group" class="form-group">
+            <label for="pin">PIN:</label>
+            <input type="text" id="pin" placeholder="Enter 6-digit PIN or leave blank to generate" />
+          </div>
+
+          <div class="button-group">
+            <button id="connect" class="btn btn-primary">Connect</button>
+            <button id="disconnect" class="btn btn-secondary" disabled>Disconnect</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">Log</h2>
+          <div id="log" class="log"></div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">Messages</h2>
+          <div class="form-group">
+            <label for="message">Send Message:</label>
+            <div class="message-box">
+              <input type="text" id="message" placeholder="Type a message..." disabled />
+              <button id="send" class="btn btn-primary" disabled>Send</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">Status</h2>
+          <p>
+            <span class="text-bold">Mode:</span>
+            <span id="status-mode">—</span>
+          </p>
+          <p>
+            <span class="text-bold">Transport:</span>
+            <span id="status-transport">—</span>
+          </p>
+          <p>
+            <span class="text-bold">PIN:</span>
+            <span id="status-pin">—</span>
+          </p>
+          <p>
+            <span class="text-bold">Connection ID:</span>
+            <span id="status-connid">—</span>
+          </p>
+          <p>
+            <span class="text-bold">Connected:</span>
+            <span id="status-connected">No</span>
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <script type="module">
+      import * as transport from '../js/transport/index.js';
+      import { randomPin } from '../js/rng.js';
+
+      const elements = {
+        transportSelect: document.getElementById('transport'),
+        modeRadios: document.querySelectorAll('input[name="mode"]'),
+        pinInput: document.getElementById('pin'),
+        connectBtn: document.getElementById('connect'),
+        disconnectBtn: document.getElementById('disconnect'),
+        messageInput: document.getElementById('message'),
+        sendBtn: document.getElementById('send'),
+        log: document.getElementById('log'),
+        statusMode: document.getElementById('status-mode'),
+        statusTransport: document.getElementById('status-transport'),
+        statusPin: document.getElementById('status-pin'),
+        statusConnId: document.getElementById('status-connid'),
+        statusConnected: document.getElementById('status-connected'),
+      };
+
+      let state = {
+        kind: 'local',
+        mode: 'host',
+        pin: '',
+        host: null,
+        conn: null,
+      };
+
+      function log(message, type = 'info') {
+        const entry = document.createElement('div');
+        entry.className = `log-entry ${type}`;
+        entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        elements.log.appendChild(entry);
+        elements.log.scrollTop = elements.log.scrollHeight;
+      }
+
+      function updateStatus() {
+        elements.statusMode.textContent = state.mode;
+        elements.statusTransport.textContent = state.kind;
+        elements.statusPin.textContent = state.pin || '—';
+        elements.statusConnId.textContent = state.conn?.id || state.host?.pin || '—';
+        const isConnected = !!(state.host || state.conn);
+        elements.statusConnected.textContent = isConnected ? 'Yes' : 'No';
+
+        elements.messageInput.disabled = !isConnected;
+        elements.sendBtn.disabled = !isConnected;
+        elements.connectBtn.disabled = isConnected;
+        elements.disconnectBtn.disabled = !isConnected;
+      }
+
+      elements.transportSelect.addEventListener('change', (e) => {
+        state.kind = e.target.value;
+        updateStatus();
+      });
+
+      elements.modeRadios.forEach((radio) => {
+        radio.addEventListener('change', (e) => {
+          if (e.target.checked) {
+            state.mode = e.target.value;
+            updateStatus();
+          }
+        });
+      });
+
+      elements.connectBtn.addEventListener('click', async () => {
+        try {
+          const kind = state.kind;
+          const mode = state.mode;
+
+          log(`Connecting as ${mode} (${kind})...`);
+
+          if (mode === 'host') {
+            let pin = elements.pinInput.value.trim();
+            if (!pin) {
+              pin = randomPin();
+              elements.pinInput.value = pin;
+            }
+            state.pin = pin;
+
+            const host = await transport.createHost(kind, { pin });
+            state.host = host;
+            log(`Host created on PIN ${pin}`, 'info');
+
+            host.onConnection((conn) => {
+              log(`Player connected: ${conn.id}`, 'info');
+
+              conn.onMessage((msg) => {
+                log(`Received from ${conn.id}: ${JSON.stringify(msg)}`);
+              });
+
+              conn.onClose(() => {
+                log(`Player disconnected: ${conn.id}`);
+              });
+            });
+          } else {
+            let pin = elements.pinInput.value.trim();
+            if (!pin) {
+              log('PIN required for joining', 'error');
+              return;
+            }
+            state.pin = pin;
+
+            const conn = await transport.joinGame(kind, pin, { timeoutMs: 10000 });
+            state.conn = conn;
+            log(`Joined game on PIN ${pin}`, 'info');
+
+            conn.onMessage((msg) => {
+              log(`Received: ${JSON.stringify(msg)}`);
+            });
+
+            conn.onClose(() => {
+              log('Disconnected from host');
+              state.conn = null;
+              updateStatus();
+            });
+          }
+
+          updateStatus();
+        } catch (err) {
+          log(`Error: ${err.message}`, 'error');
+        }
+      });
+
+      elements.disconnectBtn.addEventListener('click', () => {
+        if (state.host) {
+          state.host.close();
+          state.host = null;
+          log('Host closed');
+        }
+        if (state.conn) {
+          state.conn.close();
+          state.conn = null;
+          log('Disconnected');
+        }
+        updateStatus();
+      });
+
+      elements.sendBtn.addEventListener('click', () => {
+        const message = elements.messageInput.value.trim();
+        if (!message) return;
+
+        const msg = { t: 'chat', text: message };
+        if (state.conn) {
+          state.conn.send(msg);
+          log(`Sent: ${JSON.stringify(msg)}`);
+        } else if (state.host) {
+          // Host sending to all connections would require tracking them
+          log('Host: to broadcast, implement per-connection send', 'error');
+        }
+        elements.messageInput.value = '';
+      });
+
+      elements.messageInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          elements.sendBtn.click();
+        }
+      });
+
+      updateStatus();
+      log('Transport test ready', 'info');
+    </script>
+  </body>
+</html>
