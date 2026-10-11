@@ -186,7 +186,7 @@ export async function createHost(opts) {
   // grant write on these nodes, not on games/<pin> itself.
   const gameNodes = [metaRef, playersRef, toHostRef, toPlayerRef];
 
-  try {
+  const claim = async () => {
     // Is the PIN already in use by a recent game?
     const existing = await metaRef.get();
     if (existing.exists()) {
@@ -204,8 +204,21 @@ export async function createHost(opts) {
       return { createdAt: window.firebase.database.ServerValue.TIMESTAMP, hostId };
     }, undefined, false);
     if (!result.committed) throw new Error('That game PIN is already in use');
+  };
+
+  // Without a connection the SDK waits forever, so give up after a while.
+  let timer;
+  try {
+    await Promise.race([
+      claim(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Could not reach the Backup server — check your connection')), opts.timeoutMs || 10000);
+      }),
+    ]);
   } catch (err) {
     throw friendly(err, 'Could not reach the Backup server');
+  } finally {
+    clearTimeout(timer);
   }
 
   // If the host vanishes (tab closed, network lost) the server cleans up.
