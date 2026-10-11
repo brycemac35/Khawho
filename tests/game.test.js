@@ -445,7 +445,7 @@ test('type-answer normalization', () => {
     }],
   };
 
-  const game = createGame(quiz);
+  const game = createGame(quiz, { shuffleQuestions: false });
   game.addPlayer('p1', 'Alice', 'Alice');
   game.start();
 
