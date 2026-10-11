@@ -125,6 +125,19 @@ export function createGame(quiz, settings = {}) {
     answers.delete(clientId);
   }
 
+  /** Known to this game (connected, or dropped out mid-game and able to rejoin). */
+  function hasPlayer(clientId) {
+    return players.has(clientId) || departed.has(clientId);
+  }
+
+  function getDisplayName(clientId) {
+    return (players.get(clientId) || departed.get(clientId))?.displayName ?? null;
+  }
+
+  function getScore(clientId) {
+    return (players.get(clientId) || departed.get(clientId))?.score ?? 0;
+  }
+
   const lock = () => { gameLocked = true; };
   const unlock = () => { gameLocked = false; };
   const isLocked = () => gameLocked;
@@ -490,6 +503,9 @@ export function createGame(quiz, settings = {}) {
     get perPlayerOrder() { return perPlayerOrder; },
 
     addPlayer,
+    hasPlayer,
+    getDisplayName,
+    getScore,
     removePlayer,
     kickPlayer,
     lock,
