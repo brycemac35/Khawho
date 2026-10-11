@@ -1,751 +1,747 @@
 /**
- * Host flow module - manages quiz selection, game creation, and gameplay
+ * Host flow: pick quiz -> settings -> lobby -> questions -> results/leaderboard -> podium.
+ * The host page is the authority: it owns the game engine and the timer, and it is the only
+ * place that knows which answers are correct.
  */
 
-import { createHost, joinGame, availableKinds } from './transport/index.js';
-import { createGame } from './game.js';
+import { createHost, availableKinds } from './transport/index.js';
+import { createGame as createEngine } from './game.js';
 import * as protocol from './protocol.js';
 import { randomPin } from './rng.js';
-import { playLobbyMusic, playCountdownTick, playTimeUp, playPodiumFanfare, setMuted } from './sound.js';
-import { listLocalQuizzes, getLocalQuiz, listLibrary, loadLibraryQuiz, getTeacherPassword, setTeacherPassword } from './storage.js';
+import { validateName, randomName } from './names.js';
+import { validateQuiz, normalizeQuiz } from './quiz.js';
+import {
+  playLobbyMusic, playCountdownTick, playTimeUp, playPodiumFanfare, setMuted, isMutedState,
+} from './sound.js';
+import {
+  listLocalQuizzes, getLocalQuiz, listLibrary, loadLibraryQuiz,
+  getTeacherPassword, setTeacherPassword, forgetTeacherPassword,
+} from './storage.js';
 
-// Global app state
 const app = {
-  // UI state
-  currentScreen: 'quiz-select',
   selectedQuiz: null,
-  selectedTransport: 'local', // Default to local for dev
-
-  // Game state
+  selectedTransport: null,
   host: null,
   game: null,
   pin: null,
-  players: new Map(), // clientId -> player state
-  connections: new Map(), // clientId -> connection
-  questionStartTime: null,
-  questionPausedTime: 0, // Total time spent paused
-  questionPauseStartTime: null, // When pause started
-  timerInterval: null,
-  questionTimer: null,
-  paused: false,
-  gameActive: false,
-
-  // UI elements cache
+  conns: new Map(), // connId -> { conn, clientId|null }
+  clientConn: new Map(), // clientId -> conn
+  lastReveal: new Map(), // clientId -> reveal message for the question just finished
+  timer: null,
+  lobbyMusic: null,
+  phase: 'quiz-select', // quiz-select | settings | lobby | question | results | leaderboard | final
+  pendingLibraryPath: null,
   screens: {},
-  elements: {},
 };
 
-// Initialize
-document.addEventListener('DOMContentLoaded', initApp);
+const $ = (id) => document.getElementById(id);
 
-async function initApp() {
-  console.log('Initializing host app');
+/** Tiny DOM builder. Everything user-controlled goes through textContent. */
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v === true ? '' : v);
+  }
+  children.flat().forEach(c => {
+    if (c !== null && c !== undefined) node.append(c);
+  });
+  return node;
+}
 
-  // Cache all screens
+/** Sound must never break the game (e.g. AudioContext blocked). */
+function safe(fn, ...args) {
+  try { fn(...args); } catch (e) { console.warn('sound failed', e); }
+}
+
+function showError(id, message) {
+  const box = $(id);
+  if (!box) return;
+  box.textContent = message || '';
+  box.classList.toggle('hidden', !message);
+}
+
+function showScreen(name) {
+  Object.entries(app.screens).forEach(([key, node]) => node.classList.toggle('hidden', key !== name));
+  app.phase = name;
+}
+
+// ---------------------------------------------------------------- quiz picking
+
+function initApp() {
   app.screens = {
-    quizSelect: document.getElementById('screen-quiz-select'),
-    settings: document.getElementById('screen-settings'),
-    lobby: document.getElementById('screen-lobby'),
-    question: document.getElementById('screen-question'),
-    results: document.getElementById('screen-results'),
-    leaderboard: document.getElementById('screen-leaderboard'),
-    final: document.getElementById('screen-final'),
+    'quiz-select': $('screen-quiz-select'),
+    settings: $('screen-settings'),
+    lobby: $('screen-lobby'),
+    question: $('screen-question'),
+    results: $('screen-results'),
+    leaderboard: $('screen-leaderboard'),
+    final: $('screen-final'),
   };
 
-  // Set up tab switching
   document.querySelectorAll('.tab-button').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-button').forEach(b => {
+        b.classList.toggle('active', b === btn);
+        b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+      });
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      e.target.classList.add('active');
-      document.getElementById(`tab-${e.target.dataset.tab}`).classList.add('active');
+      $(`tab-${btn.dataset.tab}`).classList.add('active');
+      if (btn.dataset.tab === 'library' && !app.libraryLoaded) loadLibraryQuizzes();
     });
   });
 
-  // Check for quiz in URL params
-  const params = new URLSearchParams(location.search);
-  if (params.has('quiz')) {
-    const quizParam = params.get('quiz');
-    if (quizParam.startsWith('local:')) {
-      const id = quizParam.substring(6);
-      const quiz = getLocalQuiz(id);
-      if (quiz) {
-        selectQuiz(quiz);
-      }
-    } else if (quizParam.startsWith('lib:')) {
-      const path = quizParam.substring(4);
-      loadAndSelectLibraryQuiz(path);
+  $('library-password-prompt').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const pwd = $('library-password').value;
+    if (!pwd || !app.pendingLibraryPath) return;
+    openLibraryQuiz(app.pendingLibraryPath, pwd);
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (app.phase !== 'quiz-select' && app.phase !== 'settings' && app.phase !== 'final') {
+      e.preventDefault();
+      e.returnValue = '';
     }
-  } else {
-    // Load quizzes
-    loadMyQuizzes();
-    loadLibraryQuizzes();
+  });
+
+  showScreen('quiz-select');
+  loadMyQuizzes();
+
+  const quizParam = new URLSearchParams(location.search).get('quiz');
+  if (quizParam?.startsWith('local:')) {
+    const quiz = getLocalQuiz(quizParam.slice(6));
+    if (quiz) selectQuiz(quiz);
+    else showError('quiz-error', 'That quiz was not found on this computer.');
+  } else if (quizParam?.startsWith('lib:')) {
+    activateTab('library');
+    openLibraryQuiz(quizParam.slice(4), getTeacherPassword());
   }
 }
 
-async function loadAndSelectLibraryQuiz(path) {
-  try {
-    const password = getTeacherPassword();
-    if (!password) {
-      promptForLibraryPassword(path);
-      return;
-    }
-    const quiz = await loadLibraryQuiz(path, password);
-    selectQuiz(quiz);
-  } catch (error) {
-    if (error.message.includes('Wrong teacher password')) {
-      setTeacherPassword(null);
-      promptForLibraryPassword(path);
-    } else {
-      showError('Error loading quiz: ' + error.message);
-    }
-  }
-}
-
-function promptForLibraryPassword(path) {
-  const pwd = prompt('Enter teacher password to access this quiz:');
-  if (pwd) {
-    setTeacherPassword(pwd);
-    loadAndSelectLibraryQuiz(path);
-  }
-}
-
-function showScreen(screenName) {
-  Object.values(app.screens).forEach(screen => screen.classList.add('hidden'));
-  if (app.screens[screenName]) {
-    app.screens[screenName].classList.remove('hidden');
-  }
-  app.currentScreen = screenName;
+function activateTab(name) {
+  document.getElementById(`tabbtn-${name}`).click();
 }
 
 function loadMyQuizzes() {
-  const list = document.getElementById('my-quizzes-list');
-  list.innerHTML = '';
-
+  const list = $('my-quizzes-list');
+  list.replaceChildren();
   const quizzes = listLocalQuizzes();
-  if (quizzes.length > 0) {
-    quizzes.forEach(quiz => {
-      const item = document.createElement('div');
-      item.className = 'quiz-item';
-      item.innerHTML = `
-        <div class="quiz-item-title">${quiz.title}</div>
-        <div class="quiz-item-meta">
-          by ${quiz.author} • ${quiz.questions.length} questions
-        </div>
-      `;
-      item.onclick = () => selectQuiz(quiz);
-      list.appendChild(item);
-    });
-  } else {
-    list.innerHTML = '<p class="text-muted">No quizzes found. Create one in the editor.</p>';
+  if (quizzes.length === 0) {
+    list.append(el('p', { class: 'text-muted' }, 'No quizzes yet. ',
+      el('a', { href: 'editor.html', class: 'inline-link' }, 'Make one in the editor'),
+      ' or pick one from the Shared Library.'));
+    return;
   }
+  quizzes.forEach(quiz => list.append(quizButton(quiz.title, quiz.author, quiz.questions?.length ?? 0, () => selectQuiz(quiz))));
+}
+
+function quizButton(title, author, count, onClick) {
+  return el('button', { type: 'button', class: 'quiz-item', onclick: onClick },
+    el('span', { class: 'quiz-item-title', text: title || 'Untitled' }),
+    el('span', { class: 'quiz-item-meta', text: `${author ? 'by ' + author + ' • ' : ''}${count} question${count === 1 ? '' : 's'}` }));
 }
 
 async function loadLibraryQuizzes() {
-  const list = document.getElementById('library-list');
-  const prompt = document.getElementById('library-password-prompt');
-
+  const list = $('library-list');
+  const status = $('library-status');
+  status.textContent = 'Loading the shared library…';
+  list.replaceChildren();
   try {
-    const quizzes = await listLibrary();
-    list.innerHTML = '';
-
-    if (quizzes.length > 0) {
-      prompt.classList.add('hidden');
-      quizzes.forEach(item => {
-        const div = document.createElement('div');
-        div.className = 'quiz-item';
-        div.innerHTML = `
-          <div class="quiz-item-title">${item.title}</div>
-          <div class="quiz-item-meta">
-            by ${item.author} • ${item.count} questions
-          </div>
-        `;
-        div.onclick = () => selectLibraryQuiz(item.path);
-        list.appendChild(div);
-      });
-    } else {
-      list.innerHTML = '<p class="text-muted">Library is empty.</p>';
-    }
+    const items = await listLibrary();
+    app.libraryLoaded = true;
+    status.textContent = items.length ? 'Pick a quiz. You will need the teacher password.' : 'The shared library is empty.';
+    items.forEach(item => list.append(quizButton(item.title, item.author, item.count, () => openLibraryQuiz(item.path, getTeacherPassword()))));
   } catch (error) {
-    list.innerHTML = `<p class="error-message">${error.message}</p>`;
+    status.textContent = `Could not load the library: ${error.message}`;
+    status.append(' ', el('button', { type: 'button', class: 'btn btn-secondary', onclick: loadLibraryQuizzes }, 'Try again'));
   }
 }
 
-async function selectLibraryQuiz(path) {
-  const password = getTeacherPassword();
+async function openLibraryQuiz(path, password) {
+  showError('quiz-error', '');
+  app.pendingLibraryPath = path;
   if (!password) {
-    showLibraryPasswordPrompt(path);
+    $('library-password-prompt').classList.remove('hidden');
+    $('library-password').focus();
     return;
   }
-
   try {
     const quiz = await loadLibraryQuiz(path, password);
+    setTeacherPassword(password);
+    $('library-password-prompt').classList.add('hidden');
+    $('library-password').value = '';
     selectQuiz(quiz);
   } catch (error) {
-    if (error.message.includes('Wrong teacher password')) {
-      setTeacherPassword(null);
-      showLibraryPasswordPrompt(path);
+    if (/Wrong teacher password/i.test(error.message)) {
+      forgetTeacherPassword();
+      $('library-password-prompt').classList.remove('hidden');
+      $('library-password').value = '';
+      $('library-password').focus();
+      showError('quiz-error', 'That password did not work. Please try again.');
     } else {
-      showError('Error: ' + error.message);
+      showError('quiz-error', error.message);
     }
   }
 }
 
-function showLibraryPasswordPrompt(path) {
-  const prompt = document.getElementById('library-password-prompt');
-  const input = document.getElementById('library-password');
-  const errorDiv = document.getElementById('library-error');
-
-  prompt.classList.remove('hidden');
-  errorDiv.classList.add('hidden');
-
-  input.onkeypress = async (e) => {
-    if (e.key === 'Enter') {
-      const password = input.value;
-      if (password) {
-        setTeacherPassword(password);
-        try {
-          const quiz = await loadLibraryQuiz(path, password);
-          selectQuiz(quiz);
-        } catch (error) {
-          setTeacherPassword(null);
-          errorDiv.textContent = error.message;
-          errorDiv.classList.remove('hidden');
-          input.value = '';
-        }
-      }
-    }
-  };
-
-  input.focus();
-}
-
-function showError(message) {
-  const errorDiv = document.getElementById('library-error');
-  if (errorDiv) {
-    errorDiv.textContent = message;
-    errorDiv.classList.remove('hidden');
-  } else {
-    alert(message);
+function selectQuiz(raw) {
+  const quiz = normalizeQuiz(raw);
+  const check = validateQuiz(quiz);
+  if (!check.ok) {
+    const first = check.errors[0];
+    activateTab('my-quizzes');
+    showError('quiz-error', `This quiz cannot be played yet: ${first.qIndex !== undefined ? `question ${first.qIndex + 1}: ` : ''}${first.message}`);
+    return;
   }
-}
-
-function selectQuiz(quiz) {
+  showError('quiz-error', '');
   app.selectedQuiz = quiz;
+  $('settings-quiz-title').textContent = `${quiz.title} — ${quiz.questions.length} questions`;
   showScreen('settings');
   loadConnectionOptions();
 }
 
-function loadConnectionOptions() {
-  const container = document.getElementById('connection-options');
-  container.innerHTML = '';
+function backToQuizzes() {
+  showScreen('quiz-select');
+}
 
+function loadConnectionOptions() {
+  const container = $('connection-options');
+  container.replaceChildren();
   const options = availableKinds();
+  const firstEnabled = options.find(o => o.enabled);
+  app.selectedTransport = firstEnabled ? firstEnabled.kind : null;
 
   options.forEach(opt => {
-    const div = document.createElement('div');
-    div.className = 'connection-option';
-    if (!opt.enabled) div.style.opacity = '0.5';
-
-    const reasonText = opt.kind === 'firebase' && !opt.enabled
-      ? '<div class="connection-option-reason">Not set up — see README</div>'
-      : '';
-
-    div.innerHTML = `
-      <label class="connection-option-label">
-        <input type="radio" name="transport" value="${opt.kind}" ${opt.enabled ? '' : 'disabled'} />
-        ${opt.label}
-        ${reasonText}
-      </label>
-    `;
-    div.addEventListener('change', (e) => {
-      if (e.target.checked) app.selectedTransport = e.target.value;
+    const input = el('input', {
+      type: 'radio', name: 'transport', value: opt.kind,
+      disabled: !opt.enabled, checked: firstEnabled && opt.kind === firstEnabled.kind,
     });
-    container.appendChild(div);
+    input.addEventListener('change', () => { if (input.checked) app.selectedTransport = opt.kind; });
+    const label = opt.kind === 'peerjs' ? 'Standard (PeerJS)' : opt.kind === 'firebase' ? 'Backup (Firebase)' : opt.label;
+    container.append(el('label', { class: 'connection-option' }, input, ' ', label,
+      !opt.enabled && opt.kind === 'firebase' ? el('span', { class: 'connection-option-reason', text: ' Not set up yet — see README' }) : null));
   });
-
-  // Pre-select first enabled option
-  const firstEnabled = options.find(o => o.enabled);
-  if (firstEnabled) {
-    document.querySelector(`input[value="${firstEnabled.kind}"]`).checked = true;
-    app.selectedTransport = firstEnabled.kind;
-  }
 }
+
+// ---------------------------------------------------------------- game creation
 
 async function createGame() {
   const quiz = app.selectedQuiz;
-  if (!quiz) {
-    alert('Select a quiz first');
-    return;
-  }
+  if (!quiz) return;
+  const button = $('create-game-button');
+  showError('settings-error', '');
+  button.disabled = true;
+  button.textContent = 'Creating game…';
 
   const settings = {
-    shuffleQuestions: document.getElementById('shuffle-questions').checked,
-    perPlayerOrder: document.getElementById('per-player-order').checked,
-    randomNamesOnly: document.getElementById('random-names').checked,
+    shuffleQuestions: $('shuffle-questions').checked,
+    perPlayerOrder: $('per-player-order').checked,
+    randomNamesOnly: $('random-names').checked,
   };
+  app.settings = settings;
 
-  // Store quiz and create game engine
-  app.selectedQuiz = quiz;
-  app.game = createGame(quiz, settings);
-
-  // Create host connection
-  app.pin = randomPin();
   try {
-    app.host = await createHost(app.selectedTransport, { pin: app.pin });
-
-    // Set up connection handler
-    app.host.onConnection(conn => {
-      console.log('New connection:', conn.id);
-      app.connections.set(conn.id, conn);
-
-      conn.onMessage((msg) => {
-        handlePlayerMessage(conn.id, msg);
-      });
-
-      conn.onClose(() => {
-        console.log('Connection closed:', conn.id);
-        if (app.gameActive) {
-          app.game.removePlayer(conn.id);
-          updatePlayersList();
-        } else {
-          app.connections.delete(conn.id);
-        }
-      });
-    });
-
-    showScreen('lobby');
-    updateLobbyDisplay();
-    playLobbyMusic();
-  } catch (error) {
-    alert(`Failed to create game: ${error.message}`);
-  }
-}
-
-async function updateLobbyDisplay() {
-  document.getElementById('pin-display').textContent = app.pin;
-  updatePlayersList();
-
-  // Try to add QR code
-  try {
-    const qrHtml = await generateQRCode();
-    if (qrHtml) {
-      const qrContainer = document.createElement('div');
-      qrContainer.className = 'qr-code-container';
-      qrContainer.innerHTML = qrHtml;
-      const pinSection = document.querySelector('.pin-section');
-      if (pinSection) {
-        // Remove old QR if exists
-        const oldQr = pinSection.querySelector('.qr-code-container');
-        if (oldQr) oldQr.remove();
-        pinSection.appendChild(qrContainer);
+    app.game = createEngine(quiz, settings);
+    let lastError = null;
+    for (let attempt = 0; attempt < 4 && !app.host; attempt++) {
+      const pin = randomPin();
+      try {
+        app.host = await createHost(app.selectedTransport, { pin });
+        app.pin = pin;
+      } catch (e) {
+        lastError = e;
+        if (!/already|taken|in use/i.test(e.message)) break;
       }
     }
-  } catch (e) {
-    console.warn('QR code generation failed:', e);
+    if (!app.host) throw lastError || new Error('Could not create a game');
+
+    app.host.onConnection(onConnection);
+    showScreen('lobby');
+    renderLobby();
+    startLobbyMusic();
+  } catch (error) {
+    showError('settings-error', `Could not create the game: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Create Game';
   }
 }
 
-function updatePlayersList() {
-  const list = document.getElementById('players-list');
-  const count = app.game.players.size;
-  list.innerHTML = '';
+function joinUrl() {
+  const url = new URL('play.html', location.href);
+  url.search = '';
+  url.searchParams.set('pin', app.pin);
+  url.searchParams.set('via', app.selectedTransport);
+  return url.href;
+}
 
-  document.getElementById('player-count').textContent = count;
+function startLobbyMusic() {
+  safe(playLobbyMusic);
+  app.lobbyMusic = setInterval(() => {
+    if (app.phase === 'lobby') safe(playLobbyMusic);
+  }, 3000);
+}
 
-  app.game.players.forEach((player, clientId) => {
-    const chip = document.createElement('div');
-    chip.className = 'player-chip';
-    chip.innerHTML = `
-      ${player.displayName}
-      <span class="player-chip-remove" onclick="hostApp.kickPlayer('${clientId}')">×</span>
-    `;
-    list.appendChild(chip);
+function renderLobby() {
+  $('pin-display').textContent = app.pin;
+  const playUrl = new URL('play.html', location.href);
+  $('join-site').textContent = playUrl.host + playUrl.pathname;
+  $('join-url').textContent = joinUrl();
+  $('mute-button').textContent = isMutedState() ? 'Sound off' : 'Sound on';
+  renderPlayers();
+  showQr();
+}
+
+async function showQr() {
+  const slot = $('qr-slot');
+  slot.replaceChildren();
+  slot.classList.add('hidden');
+  try {
+    const qrcode = await loadQrLib();
+    const qr = qrcode(0, 'M');
+    qr.addData(joinUrl());
+    qr.make();
+    const img = el('img', { src: qr.createDataURL(6, 2), alt: 'QR code to join the game', width: 200, height: 200 });
+    slot.append(img);
+    slot.classList.remove('hidden');
+  } catch (e) {
+    console.warn('QR code unavailable:', e.message); // lobby still works with the PIN and link
+  }
+}
+
+let qrPromise = null;
+function loadQrLib() {
+  if (window.qrcode) return Promise.resolve(window.qrcode);
+  if (!qrPromise) {
+    qrPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js';
+      script.onload = () => (window.qrcode ? resolve(window.qrcode) : reject(new Error('QR library missing')));
+      script.onerror = () => { qrPromise = null; reject(new Error('QR library failed to load')); };
+      document.head.append(script);
+    });
+  }
+  return qrPromise;
+}
+
+function renderPlayers() {
+  const players = [...app.game.players];
+  $('player-count').textContent = players.length;
+  [$('players-list'), $('game-players-list')].forEach(list => {
+    list.replaceChildren();
+    players.forEach(([clientId, player]) => {
+      list.append(el('div', { class: 'player-chip' },
+        el('span', { text: player.displayName }),
+        el('button', {
+          type: 'button', class: 'player-chip-remove', 'aria-label': `Remove ${player.displayName}`,
+          onclick: () => kickPlayer(clientId),
+        }, '×')));
+    });
   });
+  $('answered-count').textContent = app.phase === 'question' ? app.game.answeredCount() : 0;
+}
+
+function kickPlayer(clientId) {
+  safeSend(clientId, protocol.kicked());
+  app.game.kickPlayer(clientId);
+  app.clientConn.delete(clientId);
+  renderPlayers();
+  if (app.phase === 'question') checkQuestionDone();
 }
 
 function copyJoinUrl() {
-  const baseUrl = location.origin + location.pathname.replace(/host\.html/, 'play.html');
-  const joinUrl = `${baseUrl}?pin=${app.pin}&via=${app.selectedTransport}`;
-  navigator.clipboard.writeText(joinUrl).then(() => {
-    alert('Join URL copied to clipboard!');
+  const url = joinUrl();
+  const done = () => showError('lobby-error', '');
+  (navigator.clipboard?.writeText(url) ?? Promise.reject()).then(done).catch(() => {
+    showError('lobby-error', `Copy this link: ${url}`);
   });
 }
 
 function toggleLock() {
-  if (app.game.isLocked()) {
-    app.game.unlock();
-    document.getElementById('lock-button').textContent = 'Lock Lobby';
-  } else {
-    app.game.lock();
-    document.getElementById('lock-button').textContent = 'Unlock Lobby';
-  }
+  const locked = !app.game.isLocked();
+  if (locked) app.game.lock(); else app.game.unlock();
+  $('lock-button').textContent = locked ? 'Unlock Lobby' : 'Lock Lobby';
 }
 
 function toggleMute() {
-  const currentMute = localStorage.getItem('khawho.muted') === 'true';
-  setMuted(!currentMute);
-  document.querySelector('button[onclick="hostApp.toggleMute()"]').textContent =
-    currentMute ? '🔊 Sound' : '🔇 Muted';
+  setMuted(!isMutedState());
+  $('mute-button').textContent = isMutedState() ? 'Sound off' : 'Sound on';
 }
 
-function handlePlayerMessage(clientId, msg) {
-  console.log('Player message:', clientId, msg);
+// ---------------------------------------------------------------- networking
 
-  if (msg.t === protocol.MSG_JOIN) {
-    // Player joining
-    try {
-      app.game.addPlayer(clientId, msg.name, msg.name);
-      app.players.set(clientId, { name: msg.name, score: 0, streak: 0 });
+function safeSend(clientId, msg) {
+  try { app.clientConn.get(clientId)?.send(msg); } catch (e) { console.warn('send failed', e); }
+}
 
-      // Send welcome
-      const conn = app.connections.get(clientId);
-      conn.send(protocol.welcome(msg.name, 0));
+function broadcast(msg) {
+  app.clientConn.forEach(conn => {
+    try { conn.send(msg); } catch (e) { console.warn('send failed', e); }
+  });
+}
 
-      updatePlayersList();
-    } catch (error) {
-      const conn = app.connections.get(clientId);
-      conn.send(protocol.reject(error.message));
-    }
-  } else if (msg.t === protocol.MSG_ANSWER) {
-    // Player answering
-    app.game.submitAnswer(clientId, msg.answer, Date.now());
+function onConnection(conn) {
+  const entry = { conn, clientId: null };
+  app.conns.set(conn.id, entry);
+  conn.onMessage(msg => handleMessage(entry, msg));
+  conn.onClose(() => handleClose(entry));
+}
+
+function handleClose(entry) {
+  app.conns.delete(entry.conn.id);
+  const { clientId, conn } = entry;
+  if (clientId && app.clientConn.get(clientId) === conn) {
+    app.clientConn.delete(clientId);
+    app.game.removePlayer(clientId);
+    renderPlayers();
+    if (app.phase === 'question') checkQuestionDone();
   }
 }
 
-async function startGame() {
-  if (app.game.players.size === 0) {
-    alert('At least one player must join');
+function handleMessage(entry, msg) {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.t === protocol.MSG_JOIN) handleJoin(entry, msg);
+  else if (msg.t === protocol.MSG_ANSWER) handleAnswer(entry, msg);
+}
+
+function handleJoin(entry, msg) {
+  const { conn } = entry;
+  const clientId = typeof msg.clientId === 'string' ? msg.clientId.slice(0, 64) : conn.id;
+  const game = app.game;
+
+  // Rejoin: same clientId comes back (refresh, lost connection, new tab)
+  if (game.hasPlayer(clientId)) {
+    const old = app.clientConn.get(clientId);
+    if (old && old !== conn) {
+      app.conns.get(old.id) && (app.conns.get(old.id).clientId = null);
+      try { old.close(); } catch { /* already gone */ }
+    }
+    const name = game.getDisplayName(clientId);
+    game.addPlayer(clientId, name, name);
+    entry.clientId = clientId;
+    app.clientConn.set(clientId, conn);
+    conn.send(protocol.welcome(name, game.getScore(clientId)));
+    resendState(clientId);
+    renderPlayers();
     return;
   }
 
-  app.gameActive = true;
-  app.game.start();
+  if (game.isLocked()) {
+    conn.send(protocol.reject('This game is locked. Ask your teacher.'));
+    return;
+  }
 
-  // Tell all players the game started
-  app.connections.forEach(conn => {
-    conn.send(protocol.lobby());
-  });
+  const taken = [...game.players.values()].map(p => p.displayName);
+  let name;
+  if (app.settings.randomNamesOnly) {
+    do { name = randomName(); } while (taken.some(t => t.toLowerCase() === name.toLowerCase()));
+  } else {
+    const check = validateName(msg.name, taken);
+    if (!check.ok) {
+      conn.send(protocol.reject(check.reason));
+      return;
+    }
+    name = check.name;
+  }
 
-  nextQuestion();
+  try {
+    game.addPlayer(clientId, name, name);
+  } catch (e) {
+    conn.send(protocol.reject(e.message));
+    return;
+  }
+  entry.clientId = clientId;
+  app.clientConn.set(clientId, conn);
+  conn.send(protocol.welcome(name, 0));
+  renderPlayers();
 }
 
-function nextQuestion() {
+/** Bring a (re)joining player up to date with whatever is on the host screen. */
+function resendState(clientId) {
+  if (app.game.isPaused()) safeSend(clientId, protocol.paused(true));
+  if (app.phase === 'question') {
+    const payload = app.game.getPlayerPayload(clientId);
+    if (payload) {
+      if (app.game.hasAnswered(clientId)) safeSend(clientId, protocol.answered());
+      else sendQuestion(clientId, payload);
+    }
+  } else if (app.phase === 'results' || app.phase === 'leaderboard') {
+    const reveal = app.lastReveal.get(clientId);
+    if (reveal) safeSend(clientId, reveal);
+  } else if (app.phase === 'final') {
+    sendEnd(clientId);
+  }
+}
+
+function handleAnswer(entry, msg) {
+  const { clientId } = entry;
+  if (!clientId || app.phase !== 'question') return;
+  if (msg.qIndex !== app.game.currentQuestionIndex) return;
+  let accepted = false;
+  try {
+    accepted = app.game.submitAnswer(clientId, msg.answer, Date.now());
+  } catch (e) {
+    console.warn('answer rejected', e.message);
+  }
+  if (accepted) {
+    safeSend(clientId, protocol.answered());
+    $('answered-count').textContent = app.game.answeredCount();
+    checkQuestionDone();
+  }
+}
+
+// ---------------------------------------------------------------- game flow
+
+function startGame() {
+  if (app.game.players.size === 0) {
+    showError('lobby-error', 'Wait for at least one player to join first.');
+    return;
+  }
+  showError('lobby-error', '');
+  clearInterval(app.lobbyMusic);
+  app.game.start();
+  nextQuestion(true);
+}
+
+function sendQuestion(clientId, p) {
+  safeSend(clientId, protocol.question(p.qIndex, p.total, p.type, p.text, p.image, p.timeLimit, p.multi, p.answers));
+}
+
+function nextQuestion(first = false) {
+  if (!first) app.game.nextQuestion();
   if (app.game.isGameOver()) {
     showFinalScreen();
     return;
   }
 
+  const { hostView, playerPayloads } = app.game.startQuestion(Date.now());
+  app.lastReveal.clear();
   showScreen('question');
+  setPauseButton(false);
 
-  const now = Date.now();
-  const result = app.game.startQuestion(now);
-  app.questionStartTime = now;
-
-  // Display question for host
-  const qIdx = app.game.questionOrder[app.game.currentQuestionIndex];
-  const q = app.selectedQuiz.questions[qIdx];
-  document.getElementById('q-number').textContent = app.game.currentQuestionIndex + 1;
-  document.getElementById('q-total').textContent = app.game.questionOrder.length;
-  document.getElementById('question-text').textContent = result.hostView.text;
-
-  if (result.hostView.image) {
-    const img = document.getElementById('question-image');
-    img.src = result.hostView.image;
+  $('q-number').textContent = hostView.qIndex + 1;
+  $('q-total').textContent = hostView.total;
+  $('answered-count').textContent = 0;
+  $('question-text').textContent = hostView.text;
+  const img = $('question-image');
+  if (hostView.image) {
+    img.src = hostView.image;
     img.classList.remove('hidden');
   } else {
-    document.getElementById('question-image').classList.add('hidden');
+    img.removeAttribute('src');
+    img.classList.add('hidden');
   }
 
-  // Display answers for host
-  const answerTiles = document.getElementById('answer-tiles');
-  answerTiles.innerHTML = '';
-  result.hostView.answers.forEach((ans, i) => {
-    const tile = document.createElement('div');
-    tile.className = 'answer-tile';
-    tile.textContent = ans.text + ` (${result.hostView.answers.filter(a => a.text === ans.text).length})`;
-    answerTiles.appendChild(tile);
-  });
+  $('per-player-note').classList.toggle('hidden', !hostView.perPlayer || hostView.type === 'type');
+  const tiles = $('answer-tiles');
+  tiles.replaceChildren();
+  if (hostView.type === 'type') {
+    tiles.append(el('p', { class: 'type-note', text: 'Students are typing their answers…' }));
+  } else if (hostView.perPlayer) {
+    hostView.tiles.forEach(t => tiles.append(el('div', { class: 'answer-tile answer-tile--plain', text: t.text })));
+  } else {
+    hostView.tiles.forEach(t => tiles.append(tileNode(t)));
+  }
+  renderPlayers();
 
-  // Send question to all players
-  app.connections.forEach(conn => {
-    const clientId = Array.from(app.connections.entries()).find(([, c]) => c === conn)?.[0];
-    if (clientId && result.playerPayloads.has(clientId)) {
-      const payload = result.playerPayloads.get(clientId);
-      conn.send(protocol.question(
-        payload.qIndex,
-        payload.total,
-        payload.type,
-        payload.text,
-        payload.image,
-        payload.timeLimit,
-        payload.multi,
-        payload.answers
-      ));
-    }
-  });
-
-  // Start timer
-  startQuestionTimer(result.hostView.timeLimit * 1000);
+  playerPayloads.forEach((payload, clientId) => sendQuestion(clientId, payload));
+  startTimer(hostView.timeLimit * 1000);
 }
 
-function startQuestionTimer(duration) {
-  clearInterval(app.questionTimer);
-  app.questionPausedTime = 0;
-  app.questionPauseStartTime = null;
-  app.paused = false;
+function tileNode(t) {
+  return el('div', { class: `answer-tile answer-tile--${t.color}`, 'data-shape': t.shape },
+    el('span', { class: `shape shape--${t.shape}`, 'aria-hidden': 'true' }),
+    el('span', { class: 'tile-text', text: t.text }));
+}
 
-  const endTime = Date.now() + duration;
-
-  // Countdown timer with 5-second warning
-  app.questionTimer = setInterval(() => {
-    if (app.paused) {
-      const ring = document.getElementById('countdown-ring');
-      if (ring) ring.textContent = '⏸';
+function startTimer(durationMs) {
+  clearInterval(app.timer);
+  let lastTick = -1;
+  const ring = $('countdown-ring');
+  const update = () => {
+    if (app.phase !== 'question') return;
+    if (app.game.isPaused()) {
+      ring.textContent = '⏸';
       return;
     }
-
-    const now = Date.now();
-    const elapsed = now - app.questionStartTime - app.questionPausedTime;
-    const remaining = Math.max(0, duration - elapsed);
-    const secondsLeft = Math.ceil(remaining / 1000);
-
-    // Update display
-    const ring = document.getElementById('countdown-ring');
-    if (ring) {
-      ring.textContent = Math.ceil(remaining / 1000);
+    const remaining = Math.max(0, durationMs - app.game.elapsedAt(Date.now()));
+    const secs = Math.ceil(remaining / 1000);
+    ring.textContent = secs;
+    if (secs <= 5 && secs > 0 && secs !== lastTick) {
+      lastTick = secs;
+      safe(playCountdownTick);
     }
+    if (remaining <= 0) finishQuestion();
+  };
+  update();
+  app.timer = setInterval(update, 200);
+}
 
-    // Play tick in last 5 seconds
-    if (secondsLeft > 0 && secondsLeft <= 5 && remaining % 1000 < 100) {
-      playCountdownTick();
-    }
-
-    // End question when timer expires
-    if (remaining <= 0) {
-      clearInterval(app.questionTimer);
-      app.paused = false;
-      endQuestion();
-    }
-  }, 100);
+function checkQuestionDone() {
+  if (app.phase === 'question' && !app.game.isPaused() && app.game.isQuestionDone(Date.now())) finishQuestion();
 }
 
 function togglePause() {
-  if (!app.gameActive) return;
-
-  app.paused = !app.paused;
-  const btn = document.getElementById('pause-button');
-
-  if (app.paused) {
-    app.questionPauseStartTime = Date.now();
-    btn.textContent = 'Resume';
-
-    // Notify all players
-    app.connections.forEach(conn => {
-      conn.send(protocol.paused(true));
-    });
-  } else {
-    if (app.questionPauseStartTime) {
-      app.questionPausedTime += Date.now() - app.questionPauseStartTime;
-      app.questionPauseStartTime = null;
-    }
-    btn.textContent = 'Pause';
-
-    // Notify all players
-    app.connections.forEach(conn => {
-      conn.send(protocol.paused(false));
-    });
+  if (app.phase !== 'question') return;
+  const now = Date.now();
+  if (app.game.isPaused()) {
+    app.game.resume(now);
+    broadcast(protocol.paused(false));
+    setPauseButton(false);
+  } else if (app.game.pause(now)) {
+    broadcast(protocol.paused(true));
+    setPauseButton(true);
   }
 }
 
-function endQuestion() {
-  clearInterval(app.questionTimer);
-  app.paused = false;
-  playTimeUp();
-
-  // Calculate elapsed time excluding paused time
-  const now = Date.now();
-  const totalElapsed = now - app.questionStartTime;
-  const effectiveElapsed = now - (totalElapsed > app.questionPausedTime ? app.questionPausedTime : 0);
-
-  const results = app.game.endQuestion(effectiveElapsed);
-
-  // Show results
-  showScreen('results');
-
-  // Send reveal to all players
-  app.connections.forEach(conn => {
-    const clientId = Array.from(app.connections.entries()).find(([, c]) => c === conn)?.[0];
-    if (clientId && results.has(clientId)) {
-      const result = results.get(clientId);
-      conn.send(protocol.reveal(
-        result.correct,
-        result.points,
-        result.score,
-        result.streak,
-        result.rank,
-        result.correctIds || [],
-        result.correctText || []
-      ));
-    }
-  });
-
-  // Display distribution chart (simplified)
-  displayDistribution(results);
-}
-
-function displayDistribution(results) {
-  const chart = document.createElement('div');
-  chart.className = 'distribution-chart';
-  document.getElementById('distribution-chart').innerHTML = '';
-
-  results.forEach((result, clientId) => {
-    const bar = document.createElement('div');
-    bar.className = 'distribution-bar';
-    bar.innerHTML = `
-      <div class="bar-graph ${result.correct ? 'correct' : ''}" style="height: ${result.score * 2}%"></div>
-      <div class="bar-label">${app.players.get(clientId)?.name}</div>
-    `;
-    document.getElementById('distribution-chart').appendChild(bar);
-  });
-}
-
-function showFinalScreen() {
-  app.gameActive = false;
-  showScreen('final');
-
-  const results = app.game.getFinalResults();
-  const podium = document.getElementById('podium');
-  podium.innerHTML = '';
-
-  // Top 3
-  const medals = ['🥇', '🥈', '🥉'];
-  results.leaderboard.slice(0, 3).forEach((player, i) => {
-    const place = document.createElement('div');
-    place.className = `podium-place podium-rank-${i + 1}`;
-    place.innerHTML = `
-      <div class="podium-medal">${medals[i]}</div>
-      <div class="podium-name">${player.name}</div>
-      <div class="podium-score">${player.score}</div>
-    `;
-    podium.appendChild(place);
-  });
-
-  playPodiumFanfare();
+function setPauseButton(paused) {
+  $('pause-button').textContent = paused ? 'Resume' : 'Pause';
+  $('pause-button').setAttribute('aria-pressed', paused ? 'true' : 'false');
 }
 
 function skipQuestion() {
-  app.game.nextQuestion();
-  nextQuestion();
+  if (app.phase === 'question') finishQuestion();
+}
+
+function finishQuestion() {
+  if (app.phase !== 'question') return;
+  clearInterval(app.timer);
+  safe(playTimeUp);
+  if (app.game.isPaused()) broadcast(protocol.paused(false));
+  const results = app.game.endQuestion(Date.now());
+  const summary = app.game.getQuestionSummary();
+
+  results.forEach((r, clientId) => {
+    const msg = protocol.reveal(r.correct, r.points, r.score, r.streak, r.rank, r.correctIds, r.correctText);
+    app.lastReveal.set(clientId, msg);
+    safeSend(clientId, msg);
+  });
+
+  renderResults(summary);
+  showScreen('results');
+  const last = app.game.currentQuestionIndex >= app.game.questionOrder.length - 1;
+  $('results-next').textContent = 'Next';
+  $('leaderboard-next').textContent = last ? 'See the podium' : 'Next Question';
+}
+
+function renderResults(s) {
+  $('results-question').textContent = s.text;
+  const chart = $('distribution-chart');
+  chart.replaceChildren();
+  const extra = $('results-extra');
+  extra.replaceChildren();
+  const max = Math.max(1, ...s.counts.map(c => c.count));
+
+  if (s.type === 'type') {
+    extra.append(el('p', { class: 'reveal-answer', text: `Accepted answer: ${s.accepted.join(' / ')}` }));
+    extra.append(el('p', { text: `${s.correctCount} of ${s.present} correct` }));
+    if (s.typed?.length) {
+      extra.append(el('ul', { class: 'typed-list' }, s.typed.map(t => el('li', { text: `${t.text} (${t.count})` }))));
+    }
+    return;
+  }
+
+  s.counts.forEach(c => {
+    chart.append(el('div', { class: 'distribution-bar' },
+      el('div', { class: 'bar-count', text: String(c.count) }),
+      el('div', { class: 'bar-track' },
+        el('div', { class: `bar-graph ${c.correct ? 'correct' : ''} ${c.color ? 'bar-' + c.color : ''}`, style: `height: ${Math.max(3, Math.round((c.count / max) * 100))}%` })),
+      el('div', { class: 'bar-label' }, c.shape ? el('span', { class: `shape shape--${c.shape}`, 'aria-hidden': 'true' }) : null,
+        el('span', { text: `${c.correct ? '✓ ' : ''}${c.text}` }))));
+  });
+  if (s.type === 'poll') extra.append(el('p', { class: 'text-muted', text: `${s.answered} of ${s.present} answered` }));
+}
+
+function nextScreen() {
+  if (app.phase !== 'results') return;
+  const board = $('leaderboard-list');
+  board.replaceChildren();
+  app.game.getLeaderboard().slice(0, 5).forEach(p => {
+    board.append(el('div', { class: 'leaderboard-row' },
+      el('span', { class: 'leaderboard-rank', text: String(p.rank) }),
+      el('span', { class: 'leaderboard-name', text: p.name }),
+      el('span', { class: 'leaderboard-score', text: String(p.score) })));
+  });
+  showScreen('leaderboard');
+}
+
+function sendEnd(clientId) {
+  const fin = app.game.getPlayerFinal(clientId);
+  if (fin) safeSend(clientId, protocol.end(fin.rank, fin.score, app.game.questionOrder.length));
+}
+
+function showFinalScreen() {
+  clearInterval(app.timer);
+  clearInterval(app.lobbyMusic);
+  showScreen('final');
+  const results = app.game.getFinalResults();
+  const podium = $('podium');
+  podium.replaceChildren();
+  const medals = ['🥇', '🥈', '🥉'];
+  results.leaderboard.slice(0, 3).forEach((player, i) => {
+    podium.append(el('div', { class: `podium-place podium-rank-${i + 1}` },
+      el('div', { class: 'podium-medal', 'aria-hidden': 'true', text: medals[i] }),
+      el('div', { class: 'podium-name', text: `${player.rank}. ${player.name}` }),
+      el('div', { class: 'podium-score', text: String(player.score) })));
+  });
+
+  const stats = app.game.getQuestionStats();
+  const stat = $('final-stats');
+  stat.replaceChildren();
+  if (stats.length) {
+    stat.append(el('h3', { text: 'How did the class do?' }),
+      el('table', { class: 'stats-table', id: 'stats-table' },
+        el('thead', {}, el('tr', {}, el('th', { text: '#' }), el('th', { text: 'Question' }), el('th', { text: '% correct' }))),
+        el('tbody', {}, stats.map(s => el('tr', {},
+          el('td', { text: String(s.pos + 1) }),
+          el('td', { text: s.text }),
+          el('td', { text: s.pct === null ? '–' : `${s.pct}%` }))))));
+  }
+
+  app.clientConn.forEach((_, clientId) => sendEnd(clientId));
+  safe(playPodiumFanfare);
 }
 
 function endGame() {
-  if (confirm('End game now?')) {
-    if (app.host) {
-      app.host.close();
-    }
+  if (app.phase === 'quiz-select' || app.phase === 'settings') return;
+  if (!confirm('End the game now? Players will see their final scores.')) return;
+  clearInterval(app.timer);
+  if (app.game.gameStarted) {
+    // Count the question in progress so scores and the CSV are complete.
+    if (app.phase === 'question') app.game.endQuestion(Date.now());
+    showFinalScreen();
+  } else {
+    app.host?.close();
     location.href = 'index.html';
   }
 }
 
 function downloadResults() {
-  // Build CSV: player, rank, score, then per-question answer/correct/points
-  const leaderboard = app.game.getFinalResults().leaderboard;
-  const totalQuestions = app.game.questionOrder.length;
-
-  // Headers
-  const headers = ['Player', 'Rank', 'Score'];
-  for (let i = 0; i < totalQuestions; i++) {
-    headers.push(`Q${i + 1} Answer`, `Q${i + 1} Correct`, `Q${i + 1} Points`);
-  }
-
-  const lines = [headers.join(',')];
-
-  // Data rows
-  leaderboard.forEach((player, idx) => {
-    const row = [
-      `"${player.name}"`,
-      player.rank,
-      player.score,
-    ];
-
-    // Add per-question data
-    for (let i = 0; i < totalQuestions; i++) {
-      row.push(''); // Answer text (would need to track during game)
-      row.push(''); // Correct (would need to track during game)
-      row.push(''); // Points (would need to track during game)
-    }
-
-    lines.push(row.join(','));
-  });
-
-  const csv = lines.join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `khawho-results-${app.pin}.csv`;
+  const csv = '﻿' + app.game.getResultsCSV();
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = el('a', { href: url, download: `khawho-results-${app.pin}.csv` });
+  document.body.append(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-async function generateQRCode() {
-  const baseUrl = location.origin + location.pathname.replace(/host\.html/, 'play.html');
-  const joinUrl = `${baseUrl}?pin=${app.pin}&via=${app.selectedTransport}`;
-
-  // Load QR code library lazily
-  if (!window.qrcode) {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js';
-    script.onerror = () => {
-      console.warn('Failed to load QR code library');
-      return;
-    };
-    document.head.appendChild(script);
-
-    // Wait for script to load
-    await new Promise(resolve => {
-      script.onload = resolve;
-      setTimeout(resolve, 3000); // Timeout after 3s
-    });
-  }
-
-  if (!window.qrcode) return null;
-
-  // Generate QR code
-  try {
-    const qr = window.qrcode(10, 'L');
-    qr.addData(joinUrl);
-    qr.make();
-    return qr.createImgTag(5, 0);
-  } catch (e) {
-    console.warn('QR code generation failed:', e);
-    return null;
-  }
-}
-
-// Export for HTML
 window.hostApp = {
-  selectQuiz,
   createGame,
+  backToQuizzes,
   copyJoinUrl,
   toggleLock,
   toggleMute,
   startGame,
-  nextQuestion,
+  nextQuestion: () => nextQuestion(false),
   skipQuestion,
   togglePause,
-  endQuestion,
   endGame,
   downloadResults,
-  kickPlayer: (clientId) => {
-    app.game.kickPlayer(clientId);
-    app.connections.get(clientId)?.send(protocol.kicked());
-    updatePlayersList();
-  },
-  nextScreen: () => {
-    // Results -> Leaderboard transition
-    showScreen('leaderboard');
-  },
-  loadLibrary: loadLibraryQuizzes,
+  nextScreen,
 };
+
+initApp();
