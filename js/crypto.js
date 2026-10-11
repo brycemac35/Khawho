@@ -11,6 +11,23 @@ const IV_LENGTH = 12; // bytes
 const KEY_LENGTH = 32; // bytes (256 bits)
 const TAG_LENGTH = 16; // bytes (128 bits)
 
+/** Base64 helpers that work in browsers (no Node Buffer) and in Node. */
+export function bytesToBase64(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = '';
+  for (let i = 0; i < arr.length; i += 0x8000) {
+    binary += String.fromCharCode(...arr.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+export function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
 /**
  * Derive a key from a password using PBKDF2-SHA256.
  * @param {string} password
@@ -73,9 +90,9 @@ export async function encryptQuiz(quiz, password) {
   );
 
   // Convert to base64
-  const saltB64 = Buffer.from(salt).toString('base64');
-  const ivB64 = Buffer.from(iv).toString('base64');
-  const ciphertextB64 = Buffer.from(ciphertext).toString('base64');
+  const saltB64 = bytesToBase64(salt);
+  const ivB64 = bytesToBase64(iv);
+  const ciphertextB64 = bytesToBase64(new Uint8Array(ciphertext));
 
   return {
     format: 'khawho-quiz-enc',
@@ -104,9 +121,9 @@ export async function decryptQuiz(file, password) {
 
   try {
     // Decode base64
-    salt = new Uint8Array(Buffer.from(file.salt, 'base64'));
-    iv = new Uint8Array(Buffer.from(file.iv, 'base64'));
-    ciphertext = new Uint8Array(Buffer.from(file.data, 'base64'));
+    salt = base64ToBytes(file.salt);
+    iv = base64ToBytes(file.iv);
+    ciphertext = base64ToBytes(file.data);
   } catch (err) {
     throw new Error('Wrong teacher password');
   }
