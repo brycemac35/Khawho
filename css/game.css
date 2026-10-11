@@ -641,3 +641,5 @@ button.quiz-item { display: block; width: 100%; text-align: left; border: 0; fon
 @media (max-width: 420px) {
   .player-answers .answer-grid { grid-template-columns: 1fr; }
 }
+.leaderboard-container, .results-container { align-items: center; }
+.leaderboard-container .controls, .results-container .controls { justify-content: center; }
