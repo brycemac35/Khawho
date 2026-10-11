@@ -5,5 +5,8 @@
   "description": "A classroom quiz game with truly random answer order",
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.40.0"
   }
 }
