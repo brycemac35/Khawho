@@ -2,19 +2,130 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Play — Khawho</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/game.css" />
   </head>
-  <body>
-    <header>
-      <a href="index.html" class="header-back">← Back</a>
-      <h1 class="header-title">Join a Game</h1>
-    </header>
-    <main class="page-content coming-soon">
-      <h2>Coming soon</h2>
-      <p>Player flow is being built.</p>
+  <body class="play-body">
+    <main class="page-content">
+      <!-- PIN Entry Screen -->
+      <div id="screen-pin-entry" class="screen">
+        <div class="container flex-center">
+          <form class="card text-center join-card" id="pin-form">
+            <h1>Join a Game</h1>
+            <div class="form-group">
+              <label for="pin-input">Game PIN</label>
+              <input type="text" id="pin-input" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="123456" maxlength="6" />
+              <button type="submit" id="pin-submit" class="btn btn-primary btn-full">Join</button>
+            </div>
+            <div id="pin-entry-error" class="error-message hidden" role="alert"></div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Nickname Entry Screen -->
+      <div id="screen-nickname" class="screen hidden">
+        <div class="container flex-center">
+          <form class="card text-center join-card" id="nickname-form">
+            <h1>Choose Your Name</h1>
+            <div class="form-group">
+              <label for="nickname-input">Nickname</label>
+              <input type="text" id="nickname-input" autocomplete="off" placeholder="Your name" maxlength="15" />
+              <button type="submit" id="nickname-submit" class="btn btn-primary btn-full">Continue</button>
+            </div>
+            <div id="nickname-error" class="error-message hidden" role="alert"></div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Waiting Lobby Screen -->
+      <div id="screen-waiting" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>You're In!</h1>
+            <p id="waiting-name" class="waiting-name"></p>
+            <p class="text-muted" role="status">Waiting for the host…</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Question Screen -->
+      <div id="screen-question" class="screen hidden">
+        <div class="player-question">
+          <div class="question-header player-question-header">
+            <h2 id="player-question-text"></h2>
+            <img id="player-question-image" class="question-image hidden" alt="" />
+          </div>
+
+          <div id="answer-container" class="player-answers"></div>
+
+          <div id="submit-section" class="hidden">
+            <button id="submit-button" class="btn btn-primary btn-full btn-large" onclick="playerApp.submitAnswer()">
+              Submit Answer
+            </button>
+          </div>
+
+          <div id="locked-message" class="locked-message hidden" role="status">Answer locked in. Waiting for everyone…</div>
+
+          <div id="pause-overlay" class="pause-overlay hidden" role="alert">
+            <div>
+              <div class="pause-icon" aria-hidden="true">⏸</div>
+              <div>Paused</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reveal Screen -->
+      <div id="screen-reveal" class="screen hidden">
+        <div class="reveal-container">
+          <div id="reveal-result" class="reveal-message" role="status"></div>
+          <div id="reveal-correct" class="reveal-correct"></div>
+          <div id="reveal-points"></div>
+          <div id="reveal-streak" class="reveal-streak"></div>
+          <div id="reveal-rank" class="reveal-rank"></div>
+          <div id="reveal-score" class="reveal-rank"></div>
+          <p class="text-muted text-center">Next question coming up…</p>
+        </div>
+      </div>
+
+      <!-- Final Results Screen -->
+      <div id="screen-final" class="screen hidden">
+        <div class="final-container text-center">
+          <h1>Game Over!</h1>
+          <div id="final-rank"></div>
+          <div id="final-score"></div>
+          <p class="text-muted">Thanks for playing!</p>
+        </div>
+      </div>
+
+      <!-- Kicked Screen -->
+      <div id="screen-kicked" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>You Were Removed</h1>
+            <p>The host removed you from the game.</p>
+            <a href="play.html" class="btn btn-primary">Start Over</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reconnecting Screen -->
+      <div id="screen-reconnecting" class="screen hidden">
+        <div class="container flex-center">
+          <div class="card text-center">
+            <h1>Reconnecting…</h1>
+            <p id="reconnect-status" role="status">Trying to get you back into the game.</p>
+            <button id="reconnect-button" class="btn btn-primary hidden" onclick="playerApp.retry()">Try again</button>
+          </div>
+        </div>
+      </div>
     </main>
+
     <script type="module" src="js/play.js"></script>
   </body>
 </html>

@@ -5,7 +5,7 @@
  */
 
 import { quizToJSON, quizFromJSON } from './quiz.js';
-import { encryptQuiz, decryptQuiz } from './crypto.js';
+import { encryptQuiz, decryptQuiz, bytesToBase64 } from './crypto.js';
 import { REPO_OWNER, REPO_NAME, QUIZ_DIR } from './config.js';
 
 const STORAGE_KEY = 'khawho.quizzes';
@@ -325,7 +325,7 @@ export async function saveLibraryQuiz(quiz, password, token) {
   // Encrypt the quiz
   const encrypted = await encryptQuiz(quiz, password);
   const content = JSON.stringify(encrypted, null, 2);
-  const encodedContent = Buffer.from(content).toString('base64');
+  const encodedContent = bytesToBase64(new TextEncoder().encode(content));
 
   // Check if file already exists
   let sha = null;

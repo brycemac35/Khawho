@@ -4,17 +4,181 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Host — Khawho</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/game.css" />
   </head>
   <body>
     <header>
       <a href="index.html" class="header-back">← Back</a>
       <h1 class="header-title">Host a Game</h1>
     </header>
-    <main class="page-content coming-soon">
-      <h2>Coming soon</h2>
-      <p>Host flow is being built.</p>
+    <main class="page-content">
+      <!-- Quiz Selection Screen -->
+      <div id="screen-quiz-select" class="screen">
+        <div class="container">
+          <h2>Choose a Quiz</h2>
+
+          <div class="tabs" role="tablist">
+            <button class="tab-button active" role="tab" aria-selected="true" data-tab="my-quizzes" id="tabbtn-my-quizzes">My Quizzes</button>
+            <button class="tab-button" role="tab" aria-selected="false" data-tab="library" id="tabbtn-library">Shared Library</button>
+          </div>
+
+          <div id="tab-my-quizzes" class="tab-content active" role="tabpanel">
+            <div id="my-quizzes-list" class="quiz-list"></div>
+          </div>
+
+          <div id="tab-library" class="tab-content" role="tabpanel">
+            <p id="library-status" class="text-muted" role="status"></p>
+            <div id="library-list" class="quiz-list"></div>
+            <form id="library-password-prompt" class="library-password hidden">
+              <label for="library-password">Teacher password</label>
+              <input type="password" id="library-password" autocomplete="current-password" />
+              <button type="submit" class="btn btn-primary">Unlock quiz</button>
+            </form>
+          </div>
+
+          <div id="quiz-error" class="error-message hidden" role="alert"></div>
+        </div>
+      </div>
+
+      <!-- Settings Screen -->
+      <div id="screen-settings" class="screen hidden">
+        <div class="container">
+          <h2>Game Settings</h2>
+          <p id="settings-quiz-title" class="text-muted"></p>
+
+          <fieldset class="form-group">
+            <legend>Connection</legend>
+            <div id="connection-options"></div>
+          </fieldset>
+
+          <div class="form-group">
+            <label class="check-label">
+              <input type="checkbox" id="shuffle-questions" checked />
+              Shuffle question order
+            </label>
+            <label class="check-label">
+              <input type="checkbox" id="per-player-order" />
+              Each student gets their own answer order
+            </label>
+            <label class="check-label">
+              <input type="checkbox" id="random-names" />
+              Random nicknames only
+            </label>
+          </div>
+
+          <div id="settings-error" class="error-message hidden" role="alert"></div>
+
+          <button id="create-game-button" class="btn btn-primary btn-full" onclick="hostApp.createGame()">
+            Create Game
+          </button>
+          <button class="btn btn-secondary btn-full mt-md" onclick="hostApp.backToQuizzes()">
+            Pick a different quiz
+          </button>
+        </div>
+      </div>
+
+      <!-- Lobby Screen -->
+      <div id="screen-lobby" class="screen hidden">
+        <div class="lobby-container">
+          <div class="pin-section">
+            <div class="pin-caption">Join at <strong id="join-site"></strong> with PIN</div>
+            <div class="pin-display" id="pin-display" aria-live="polite"></div>
+            <div id="qr-slot" class="qr-code-container hidden"></div>
+            <div class="join-url" id="join-url"></div>
+            <button class="btn btn-secondary" onclick="hostApp.copyJoinUrl()">Copy Join Link</button>
+          </div>
+
+          <div class="players-section">
+            <h3>Players (<span id="player-count">0</span>)</h3>
+            <div id="players-list" class="players-list"></div>
+          </div>
+
+          <div id="lobby-error" class="error-message hidden" role="alert"></div>
+
+          <div class="controls">
+            <button id="lock-button" class="btn btn-secondary" onclick="hostApp.toggleLock()">Lock Lobby</button>
+            <button id="mute-button" class="btn btn-secondary" onclick="hostApp.toggleMute()">Sound on</button>
+            <button class="btn btn-primary btn-large" id="start-button" onclick="hostApp.startGame()">Start Game</button>
+            <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Question Screen -->
+      <div id="screen-question" class="screen hidden">
+        <div class="question-container">
+          <div class="question-header">
+            <div class="question-number">
+              Question <span id="q-number">1</span> of <span id="q-total">10</span>
+              <span class="answered-count"><span id="answered-count">0</span> answered</span>
+            </div>
+            <div class="countdown" id="countdown-ring" role="timer" aria-live="off"></div>
+          </div>
+
+          <div class="question-content">
+            <h2 id="question-text"></h2>
+            <img id="question-image" class="question-image hidden" alt="" />
+          </div>
+
+          <p id="per-player-note" class="text-muted hidden">Each student sees the answers in their own order.</p>
+          <div id="answer-tiles" class="answer-grid"></div>
+
+          <details id="game-players" class="game-players">
+            <summary>Players</summary>
+            <div id="game-players-list" class="players-list"></div>
+          </details>
+
+          <div class="question-controls">
+            <button class="btn btn-secondary" id="skip-button" onclick="hostApp.skipQuestion()">Skip</button>
+            <button class="btn btn-secondary" id="pause-button" onclick="hostApp.togglePause()">Pause</button>
+            <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Results Screen -->
+      <div id="screen-results" class="screen hidden">
+        <div class="results-container">
+          <h2>Results</h2>
+          <h3 id="results-question" class="text-muted"></h3>
+          <div id="distribution-chart" class="distribution-chart"></div>
+          <div id="results-extra"></div>
+          <div class="controls">
+            <button class="btn btn-primary btn-large" id="results-next" onclick="hostApp.nextScreen()">Next</button>
+            <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Leaderboard Screen -->
+      <div id="screen-leaderboard" class="screen hidden">
+        <div class="leaderboard-container">
+          <h2>Leaderboard</h2>
+          <div id="leaderboard-list" class="leaderboard-list"></div>
+          <div class="controls">
+            <button class="btn btn-primary btn-large" id="leaderboard-next" onclick="hostApp.nextQuestion()">Next Question</button>
+            <button class="btn btn-secondary" onclick="hostApp.endGame()">End Game</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Final Screen -->
+      <div id="screen-final" class="screen hidden">
+        <div class="final-container">
+          <h2>Game Over!</h2>
+          <div class="podium" id="podium"></div>
+          <div class="controls">
+            <button class="btn btn-primary" id="download-csv" onclick="hostApp.downloadResults()">Download results (CSV)</button>
+            <button class="btn btn-secondary" onclick="location.reload()">Play Again</button>
+            <a href="index.html" class="btn btn-secondary">Home</a>
+          </div>
+          <div id="final-stats"></div>
+        </div>
+      </div>
     </main>
+
     <script type="module" src="js/host.js"></script>
   </body>
 </html>
